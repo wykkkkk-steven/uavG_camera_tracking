@@ -1,0 +1,51 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# ROS 2 generated directories
+build/
+install/
+log/
+
+# Python packaging
+*.egg-info/
+dist/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# Temporary files
+*.log
+*.tmp
+*.swp
+*~
+
+# Testing cache
+.pytest_cache/
+.mypy_cache/
+
+# Model files and training outputs
+runs/
+wandb/
+*.pt
+*.pth
+*.onnx
+*.engine
+
+# ROS bag files
+*.bag
+*.db3
+rosbag2_*/
+
+# Secrets
+.env
+*.key
+*.pem
+credentials.json
