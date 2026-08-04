@@ -1,0 +1,79 @@
+TERMINAL1 PX4&GAZEBO
+cd ~/Desktop
+cd ~/PX4-Autopilot
+PX4_GZ_WORLD=baylands make px4_sitl gz_x500_depth
+
+PX4_GZ_WORLD=XXX make px4_sitl gz_x500_XXX  (mono_cam / depth)
+(aruco, baylands, lawn, rover, walls, windy, moving_platform)
+
+TERMINAL2  GROUND
+cd ~/Desktop
+./QGroundControl-x86_64.AppImage
+
+TERMINAL3 ROS2
+MicroXRCEAgent udp4 -p 8888
+
+TERMINAL4 GZ_ROS BRIDGE
+(depth):
+ros2 run ros_gz_bridge parameter_bridge \
+"/world/baylands/model/x500_depth_0/link/camera_link/sensor/IMX214/image@sensor_msgs/msg/Image[gz.msgs.Image" \
+"/depth_camera@sensor_msgs/msg/Image[gz.msgs.Image" \
+"/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo" \
+--ros-args \
+-r /world/baylands/model/x500_depth_0/link/camera_link/sensor/IMX214/image:=/camera/image_raw \
+-r /depth_camera:=/camera/depth/image_raw \
+-r /camera_info:=/camera/camera_info
+
+(mono):
+ros2 run ros_gz_bridge parameter_bridge \
+"/world/baylands/model/x500_mono_cam_0/link/camera_link/sensor/imager/image@sensor_msgs/msg/Image[gz.msgs.Image" \
+"/world/baylands/model/x500_mono_cam_0/link/camera_link/sensor/imager/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo" \
+--ros-args \
+-r /world/baylands/model/x500_mono_cam_0/link/camera_link/sensor/imager/image:=/camera/image_raw \
+-r /world/baylands/model/x500_mono_cam_0/link/camera_link/sensor/imager/camera_info:=/camera/camera_info
+
+
+TERMINAL5 FLIGHT CONTROL
+
+source ~/venvs/ros_mavsdk/bin/activate
+(depth):PYTHONNOUSERSITE=1 ~/venvs/ros_mavsdk/bin/python3 -m px4_camera_tracking.uavG_local_waypoint_velocity
+
+(depth):PYTHONNOUSERSITE=1 ~/venvs/ros_mavsdk/bin/python3 -m px4_camera_tracking.uavG_local_waypoint_position
+
+(depth):PYTHONNOUSERSITE=1 ~/venvs/ros_mavsdk/bin/python3 -m px4_camera_tracking.uavG_local_waypoint_auto
+
+(depth):PYTHONNOUSERSITE=1 ~/venvs/ros_mavsdk/bin/python3 -m px4_camera_tracking.uavG_local_waypoint_avoidance
+
+(mono):PYTHONNOUSERSITE=1 ~/venvs/ros_mavsdk/bin/python3 -m px4_camera_tracking.uavG_mono_tracking
+
+
+CHARUCO BOX:
+TERMINAL1 GENERATE BOX:
+cd ~/charuco_target
+PYTHONNOUSERSITE=1 ~/venvs/ros_mavsdk/bin/python3 setup_charuco_target_vertical.py   (change with file name)
+
+Single face:
+gz service -s /world/baylands/create   --reqtype gz.msgs.EntityFactory   --reptype gz.msgs.Boolean   --timeout 300   --req 'sdf_filename: "/home/xueyang/.gz/models/charuco_target/model.sdf" name: "charuco_target" pose {position {x: 8 y: -2 z: 3.5} orientation {y: 0.7071 w: 0.7071}}'
+
+Four face:
+gz service -s /world/baylands/create   --reqtype gz.msgs.EntityFactory   --reptype gz.msgs.Boolean   --timeout 300   --req 'sdf_filename: "/home/xueyang/.gz/models/four_face_charuco_box/model.sdf" name: "four_face_charuco_box" pose {position {x: 14 y: 0 z: 3.5} orientation {w: 1}}'
+
+TERMINAL2 MOVE TARGET:
+cd ~/charuco_target
+./move_charuco_linear.sh baylands charuco_target    (single face)
+
+./move_four_face_charuco_box_fb.sh baylands four_face_charuco_box   (four face)
+
+./move_charuco_circle.sh baylands charuco_target
+
+
+TERMINAL7 YOLO DETECTION
+conda activate yolo
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+python3 /home/xueyang/yolo_image_test.py
+
+TARGET BUILD (after editing the flight control)
+cd ~/ros2_ws
+colcon build --packages-select px4_camera_tracking
+source install/setup.bash
