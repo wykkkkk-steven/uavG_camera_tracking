@@ -9,19 +9,19 @@ import sys
 import rclpy
 from mavsdk import System
 
-from test_params import (
+from .test_params import (
     DISTANCE_DEFAULT_M, DISTANCE_MAX_VALID_M,
 )
-from test_utils import ask_float, read_console_line
-from test_flight import (
+from .test_utils import ask_float, read_console_line
+from .test_flight import (
     connect_and_takeoff,
     start_offboard_velocity,
     hover_wait_for_command,
     return_home_and_hover,
     safe_stop_and_land,
 )
-from test_detector import YOLODetectorNode, spin_ros_node
-from test_tracker import (
+from .test_detector import YOLODetectorNode, spin_ros_node
+from .test_tracker import (
     search_until_target_found,
     approach_until_in_range,
     visual_tracking_control,

@@ -10,7 +10,7 @@ import time
 
 from mavsdk.offboard import VelocityBodyYawspeed
 
-from test_params import (
+from .test_params import (
     CONTROL_HZ,
     SEARCH_YAW_RATE_DEG_S, SEARCH_TIMEOUT_S, SEARCH_CONFIRM_MIN_FRAMES,
     APPROACH_YAW_RATE_DEG_S, APPROACH_FORWARD_SPEED, APPROACH_ENTER_RANGE_M,
@@ -30,7 +30,7 @@ from test_params import (
     TARGET_LOST_HOVER_S, TARGET_LOST_LAND_S,
     LOST_YAW_SEARCH_RATE_DEG_S, LOOMING_MIN_AREA,
 )
-from test_utils import clamp, slew_limit
+from .test_utils import clamp, slew_limit
 
 
 # ================================================================
@@ -97,6 +97,9 @@ async def search_until_target_found(drone, detector, stop_event=None, land_event
             if confirm_count >= SEARCH_CONFIRM_MIN_FRAMES:
                 dist_str = f"{detector.distance_m:.1f}m" if detector.distance_m > 0 else f">{DISTANCE_MAX_VALID_M}m(远距)"
                 print(f"[搜索] 目标确认! bearing={detector.bearing_deg:.1f}° dist={dist_str}")
+                for _ in range(5):
+                    await sender.send(drone, 0.0, 0.0)
+                    await asyncio.sleep(0.05)
                 return "found"
         else:
             confirm_count = 0

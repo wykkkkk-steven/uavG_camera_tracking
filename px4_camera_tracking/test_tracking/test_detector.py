@@ -15,7 +15,7 @@ from cv_bridge import CvBridge
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
 
-from test_params import (
+from .test_params import (
     IMAGE_TOPIC, CAMERA_INFO_TOPIC,
     YOLO_MODEL_PATH, YOLO_CONF_THRESHOLD, YOLO_IOU_THRESHOLD, YOLO_TARGET_CLASSES,
     VIEW_SIZE_TABLE, DEFAULT_TARGET_SIZE,

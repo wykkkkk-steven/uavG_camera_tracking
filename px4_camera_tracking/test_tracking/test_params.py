@@ -103,7 +103,7 @@ URGENT_RETREAT_KP = 0.55
 # ================================================================
 # YOLO 检测参数
 # ================================================================
-YOLO_MODEL_PATH = "REPLACE_WITH_YOUR_MODEL.pt"  # 必须替换！默认值会导致加载失败
+YOLO_MODEL_PATH = "/home/xueyang/uav_yolo_runs/x500_2872_yolo11s_1920-3/weights/best.pt"  # 必须替换！默认值会导致加载失败
 YOLO_CONF_THRESHOLD = 0.5
 YOLO_IOU_THRESHOLD = 0.45
 YOLO_TARGET_CLASSES = []         # 可调，选了全部接受
