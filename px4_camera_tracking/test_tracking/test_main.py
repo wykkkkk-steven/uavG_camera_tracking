@@ -3,29 +3,32 @@
 """
 
 import asyncio
+import math
 import signal
 import sys
 
 import rclpy
 from mavsdk import System
 
-from .test_params import (
+from test_params import (
     DISTANCE_DEFAULT_M, DISTANCE_MAX_VALID_M,
+    PLANNER_ENABLED,
 )
-from .test_utils import ask_float, read_console_line
-from .test_flight import (
+from test_utils import ask_float, read_console_line
+from test_flight import (
     connect_and_takeoff,
     start_offboard_velocity,
     hover_wait_for_command,
     return_home_and_hover,
     safe_stop_and_land,
 )
-from .test_detector import YOLODetectorNode, spin_ros_node
-from .test_tracker import (
+from test_detector import YOLODetectorNode, spin_ros_node
+from test_tracker import (
     search_until_target_found,
     approach_until_in_range,
     visual_tracking_control,
 )
+from test_planner import TargetPositionEstimator
 
 async def command_listener(stop_event, land_event):
     import select
@@ -96,6 +99,9 @@ async def main_async():
     detector = YOLODetectorNode()
     drone = System()
 
+    # Planner 初始化
+    planner = TargetPositionEstimator(DISTANCE_DEFAULT_M) if PLANNER_ENABLED else None
+
     stop_event = asyncio.Event()
     land_event = asyncio.Event()
 
@@ -142,7 +148,35 @@ async def main_async():
 
             cmd_task = asyncio.create_task(command_listener(stop_event, land_event))
 
+            # 位置提供器：供 planner 使用
+            # pipeline 模式：每帧调用 ensure_future 触发异步更新，
+            # 读上一次更新的结果（延迟一帧≈100ms，10Hz下可接受）
+            _pos_cache = {"n": 0.0, "e": 0.0, "h": 0.0, "pending": False}
+
+            async def _update_pos_cache():
+                try:
+                    pos = await drone.telemetry.position().__anext__()
+                    heading = await drone.telemetry.heading().__anext__()
+                    dlat = pos.latitude_deg - ref_lat
+                    dlon = pos.longitude_deg - ref_lon
+                    _pos_cache["n"] = dlat * 111320.0
+                    _pos_cache["e"] = dlon * 111320.0 * math.cos(math.radians(ref_lat))
+                    _pos_cache["h"] = heading.heading_deg
+                except Exception:
+                    pass
+                finally:
+                    _pos_cache["pending"] = False
+
+            def drone_position_provider():
+                """同步回调，返回 (north_m, east_m, heading_deg)。
+                每次调用触发一次异步更新，返回上次更新结果。"""
+                if not _pos_cache["pending"]:
+                    _pos_cache["pending"] = True
+                    asyncio.ensure_future(_update_pos_cache())
+                return _pos_cache["n"], _pos_cache["e"], _pos_cache["h"]
+
             detector.reset_tracking_state()
+
             search_result = await search_until_target_found(
                 drone, detector, stop_event, land_event,
             )
@@ -186,6 +220,11 @@ async def main_async():
 
             cmd_task = asyncio.create_task(command_listener(stop_event, land_event))
 
+            # 如果 planner 启用，更新期望距离并重置
+            if planner is not None:
+                planner._desired_distance_m = desired_distance_m
+                planner.reset()
+
             track_result = await visual_tracking_control(
                 drone,
                 detector,
@@ -193,6 +232,8 @@ async def main_async():
                 track_duration_s,
                 stop_event,
                 land_event,
+                planner=planner,
+                drone_position_provider=drone_position_provider,
             )
 
             if cmd_task is not None:
