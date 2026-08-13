@@ -11,11 +11,11 @@ import time
 from mavsdk import System
 from mavsdk.offboard import OffboardError, VelocityBodyYawspeed
 
-from .test_params import (
+from test_params import (
     UDP_ADDR, TAKEOFF_ALT_M,
     REACHED_XY_THR_M, REACHED_ALT_THR_M, WAIT_REACHED_TIMEOUT_S,
 )
-from .test_utils import (
+from test_utils import (
     clamp, meters_from_gps, distance_ne,
 )
 
@@ -196,17 +196,24 @@ async def return_home_and_hover(drone, ref_lat, ref_lon, hover_alt=TAKEOFF_ALT_M
             print("[返航] 已到达 Home 上方")
             break
 
+        # 误差 = 目标位置(Home=0,0) - 当前位置
+        north_err = 0.0 - dn
+        east_err = 0.0 - de
+
         heading = await get_heading_once(drone)
         if heading is None:
             heading = 0.0
 
         yaw_rad = math.radians(heading)
-        fwd = dn * math.cos(yaw_rad) + de * math.sin(yaw_rad)
-        rgt = -dn * math.sin(yaw_rad) + de * math.cos(yaw_rad)
+        # 速度方向：北东误差 → body 系
+        vel_n = north_err / max(dist, 0.1)
+        vel_e = east_err / max(dist, 0.1)
+        fwd = vel_n * math.cos(yaw_rad) + vel_e * math.sin(yaw_rad)
+        rgt = -vel_n * math.sin(yaw_rad) + vel_e * math.cos(yaw_rad)
 
         speed = clamp(dist * 0.5, 0.3, 2.0)
-        fwd_cmd = clamp(speed * fwd / max(dist, 0.1), -2.0, 2.0)
-        rgt_cmd = clamp(speed * rgt / max(dist, 0.1), -2.0, 2.0)
+        fwd_cmd = clamp(fwd * speed, -2.0, 2.0)
+        rgt_cmd = clamp(rgt * speed, -2.0, 2.0)
 
         try:
             await drone.offboard.set_velocity_body(
