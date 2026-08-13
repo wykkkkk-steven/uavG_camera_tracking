@@ -11,11 +11,11 @@ import time
 from mavsdk import System
 from mavsdk.offboard import OffboardError, VelocityBodyYawspeed
 
-from test_params import (
+from .test_params import (
     UDP_ADDR, TAKEOFF_ALT_M,
     REACHED_XY_THR_M, REACHED_ALT_THR_M, WAIT_REACHED_TIMEOUT_S,
 )
-from test_utils import (
+from .test_utils import (
     clamp, meters_from_gps, distance_ne,
 )
 
