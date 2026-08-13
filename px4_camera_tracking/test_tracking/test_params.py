@@ -103,7 +103,7 @@ URGENT_RETREAT_KP = 0.55
 # ================================================================
 # YOLO 检测参数
 # ================================================================
-YOLO_MODEL_PATH = "/home/xueyang/uav_yolo_runs/x500_2872_yolo11s_1920-3/weights/best.pt"  # 必须替换！默认值会导致加载失败
+YOLO_MODEL_PATH = "REPLACE_WITH_YOUR_MODEL.pt"  # 必须替换！默认值会导致加载失败
 YOLO_CONF_THRESHOLD = 0.5
 YOLO_IOU_THRESHOLD = 0.45
 YOLO_TARGET_CLASSES = []         # 可调，选了全部接受
@@ -155,3 +155,13 @@ POSITION_UPDATE_DISTANCE_M = 0.30
 YAW_UPDATE_DEG = 5.0
 MAX_POSITION_SETPOINT_STEP_M = 1.20
 POSITION_TRACK_HOLD_AFTER_TARGET_LOST_S = 1.5
+
+# ================================================================
+# Planner 模式参数（航点跟踪）
+# ================================================================
+PLANNER_ENABLED = False                    # True=航点跟踪, False=纯reactive
+PLANNER_KP_XY = 0.50                      # 航点→速度的 P 增益（北/东）
+PLANNER_MAX_SPEED_M_S = 1.0               # 航点跟踪最大速度
+PLANNER_ARRIVE_RADIUS_M = 0.50            # 到达航点半径
+PLANNER_YAW_TO_WAYPOINT = True            # 航点跟踪时 yaw 朝航点
+PLANNER_KP_YAW = 0.80                     # 航点 yaw P 增益
