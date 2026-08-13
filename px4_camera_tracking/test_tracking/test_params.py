@@ -157,11 +157,24 @@ MAX_POSITION_SETPOINT_STEP_M = 1.20
 POSITION_TRACK_HOLD_AFTER_TARGET_LOST_S = 1.5
 
 # ================================================================
+# 卡尔曼滤波参数（目标状态估计）
+# 状态向量 x = [n, e, vn, ve]（位置NE + 速度NE）
+# ================================================================
+KF_PROCESS_NOISE_POS = 0.01         # Q: 位置过程噪声（m²）
+KF_PROCESS_NOISE_VEL = 0.10         # Q: 速度过程噪声（(m/s)²）
+KF_MEASUREMENT_NOISE_POS = 0.25     # R: 位置观测噪声（m²，仿真较小）
+KF_INITIAL_COV_POS = 10.0           # P0: 位置初始协方差
+KF_INITIAL_COV_VEL = 5.0            # P0: 速度初始协方差
+KF_WARMUP_FRAMES = 10              # 暖机帧数（20帧≈2秒）：前N帧输出YOLO原始值，KF后台跑
+KF_MAX_DT_S = 0.5                  # dt 跳变保护：超过此值则截断（目标丢失恢复后）
+
+# ================================================================
 # Planner 模式参数（航点跟踪）
+# 架构：Planner管方向(yaw)，Distance Controller管速度(forward)
+#       距离安全优先于航点追踪
 # ================================================================
 PLANNER_ENABLED = False                    # True=航点跟踪, False=纯reactive
-PLANNER_KP_XY = 0.50                      # 航点→速度的 P 增益（北/东）
-PLANNER_MAX_SPEED_M_S = 1.0               # 航点跟踪最大速度
-PLANNER_ARRIVE_RADIUS_M = 0.50            # 到达航点半径
-PLANNER_YAW_TO_WAYPOINT = True            # 航点跟踪时 yaw 朝航点
-PLANNER_KP_YAW = 0.80                     # 航点 yaw P 增益
+PLANNER_KP_YAW = 0.80                     # 航点 yaw P 增益（朝目标方向转）
+PLANNER_KP_DIST = 0.30                   # 距离→速度 P 增益
+PLANNER_MAX_FORWARD = 1.0                 # Planner模式最大前进速度
+PLANNER_MAX_RETREAT = 0.75                # Planner模式最大后退速度
