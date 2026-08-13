@@ -10,25 +10,25 @@ import sys
 import rclpy
 from mavsdk import System
 
-from test_params import (
+from .test_params import (
     DISTANCE_DEFAULT_M, DISTANCE_MAX_VALID_M,
     PLANNER_ENABLED,
 )
-from test_utils import ask_float, read_console_line
-from test_flight import (
+from .test_utils import ask_float, read_console_line
+from .test_flight import (
     connect_and_takeoff,
     start_offboard_velocity,
     hover_wait_for_command,
     return_home_and_hover,
     safe_stop_and_land,
 )
-from test_detector import YOLODetectorNode, spin_ros_node
-from test_tracker import (
+from .test_detector import YOLODetectorNode, spin_ros_node
+from .test_tracker import (
     search_until_target_found,
     approach_until_in_range,
     visual_tracking_control,
 )
-from test_planner import TargetPositionEstimator
+from .test_planner import TargetPositionEstimator
 
 async def command_listener(stop_event, land_event):
     import select
@@ -82,7 +82,6 @@ async def ask_track_duration(stop_event, land_event):
 
 async def ask_desired_distance(stop_event, land_event):
     value = await ask_float(
-        "请输入期望跟踪距离 desired_distance_m，单位 m，例如 3.5",
         default_value=DISTANCE_DEFAULT_M,
         min_value=1.0,
         max_value=DISTANCE_MAX_VALID_M,
@@ -148,9 +147,6 @@ async def main_async():
 
             cmd_task = asyncio.create_task(command_listener(stop_event, land_event))
 
-            # 位置提供器：供 planner 使用
-            # pipeline 模式：每帧调用 ensure_future 触发异步更新，
-            # 读上一次更新的结果（延迟一帧≈100ms，10Hz下可接受）
             _pos_cache = {"n": 0.0, "e": 0.0, "h": 0.0, "pending": False}
 
             async def _update_pos_cache():
