@@ -1,9 +1,5 @@
 """
 搜索 + 跟踪状态机
-搜索目标 + 远距接近 + 精细跟踪状态机
-支持两种跟踪模式：
-  - reactive（默认）：bearing + distance → 速度指令
-  - planner：从 planner 航点计算速度指令（航点跟踪）
 """
 
 import asyncio
@@ -41,9 +37,6 @@ from .test_params import (
 from .test_utils import clamp, slew_limit
 
 
-# ================================================================
-# 速度发送辅助（连续失败计数 + 日志）
-# ================================================================
 class _VelocitySender:
     """发送速度指令，连续失败超过阈值时触发紧急降落。"""
     def __init__(self, land_event=None):
@@ -77,9 +70,6 @@ def _check_stdin_command(stop_event, land_event):
     return False
 
 
-# ================================================================
-# 搜索阶段
-# ================================================================
 async def search_until_target_found(drone, detector, stop_event=None, land_event=None):
     print("[搜索] 开始原地旋转搜索...")
     dt = 1.0 / CONTROL_HZ
@@ -114,9 +104,6 @@ async def search_until_target_found(drone, detector, stop_event=None, land_event
         await asyncio.sleep(dt)
 
 
-# ================================================================
-# 远距接近阶段（识别到但超出测距范围）
-# ================================================================
 async def approach_until_in_range(drone, detector, stop_event=None, land_event=None):
     """
     远距识别到目标后，向目标飞近直到进入测距范围。
@@ -135,7 +122,6 @@ async def approach_until_in_range(drone, detector, stop_event=None, land_event=N
         if _check_stdin_command(stop_event, land_event):
             return "land"
 
-        # 目标丢失
         if not detector.target_found:
             print("[接近] 目标丢失")
             return "lost"
@@ -156,26 +142,10 @@ async def approach_until_in_range(drone, detector, stop_event=None, land_event=N
         await asyncio.sleep(dt)
 
 
-# ================================================================
-# 精细跟踪核心（状态机）
-# ================================================================
 async def visual_tracking_control(drone, detector, desired_distance_m, track_duration_s,
                                   stop_event=None, land_event=None,
                                   planner=None, drone_position_provider=None):
-    """
-    精细跟踪核心（状态机）。
-
-    参数:
-        drone: MAVSDK System
-        detector: YOLODetectorNode
-        desired_distance_m: 期望跟踪距离
-        track_duration_s: 跟踪时长（0=无限）
-        stop_event: 停止事件
-        land_event: 降落事件
-        planner: TargetPositionEstimator 实例（None=纯 reactive 模式）
-        drone_position_provider: 获取无人机 NE 位置的 callable，返回 (north_m, east_m, heading_deg)
-                                 planner 模式下必须提供
-    """
+    """精细跟踪核心（状态机）。"""
 
     dt = 1.0 / CONTROL_HZ
     t0 = time.time()
@@ -185,7 +155,6 @@ async def visual_tracking_control(drone, detector, desired_distance_m, track_dur
     arrival_confirm = 0
     urgent_confirm = 0
 
-    # PREVIEW 状态
     preview_active = False
     preview_start_time = None
     preview_frozen_distance = 0.0
@@ -222,7 +191,6 @@ async def visual_tracking_control(drone, detector, desired_distance_m, track_dur
         range_rate = detector.range_rate
         current_area = detector.area
 
-        # ── Planner 更新 ──
         if planner is not None and drone_position_provider is not None and target_found:
             try:
                 dn, de, dh = drone_position_provider()
@@ -303,7 +271,7 @@ async def visual_tracking_control(drone, detector, desired_distance_m, track_dur
             if preview_active:
                 distance_m = preview_frozen_distance + preview_frozen_range_rate * preview_elapsed
                 distance_m = clamp(distance_m, DISTANCE_MIN_SAFE_M, DISTANCE_MAX_VALID_M)
-                range_rate_for_urgent = 0.0  # PREVIEW 期间不触发 URGENT
+                range_rate_for_urgent = preview_frozen_range_rate
             else:
                 distance_m = ema_distance_m
                 range_rate_for_urgent = range_rate
@@ -330,25 +298,20 @@ async def visual_tracking_control(drone, detector, desired_distance_m, track_dur
             fwd_slew = FORWARD_SLEW_OPTIMAL_M_S2
             yaw_slew = YAW_SLEW_OPTIMAL_DEG_S2
 
-        # ── URGENT 后退检测 ──
         dangerously_close = distance_m < DISTANCE_MIN_SAFE_M
         too_close = distance_m < (desired_distance_m - URGENT_TOO_CLOSE_MARGIN_M)
         closing_fast = range_rate_for_urgent < -URGENT_CLOSING_SPEED_M_S
 
-        if preview_active:
-            urgent_confirm = 0
+        if dangerously_close or (too_close and closing_fast):
+            urgent_confirm += 1
         else:
-            if dangerously_close or (too_close and closing_fast):
-                urgent_confirm += 1
-            else:
-                urgent_confirm = 0
+            urgent_confirm = 0
 
         abs_bearing = abs(bearing_deg)
 
         if urgent_confirm >= URGENT_CONFIRM_FRAMES:
             state = "URGENT_RETREAT"
         elif state == "URGENT_RETREAT":
-            # URGENT 退出条件：不再危险 → 回到 ALIGN
             if not (dangerously_close or (too_close and closing_fast)):
                 state = "ALIGN"
                 align_confirm = 0
@@ -359,7 +322,6 @@ async def visual_tracking_control(drone, detector, desired_distance_m, track_dur
             if abs_bearing < ALIGN_BEARING_DEG:
                 align_confirm += 1
                 if align_confirm >= ALIGN_CONFIRM_FRAMES:
-                    # 有 planner 且方向有效 → 进 PLANNER_TRACK，否则进 TRACK
                     if planner is not None and planner.direction_valid:
                         state = "PLANNER_TRACK"
                         arrival_confirm = 0
@@ -368,12 +330,10 @@ async def visual_tracking_control(drone, detector, desired_distance_m, track_dur
             else:
                 align_confirm = 0
         elif state == "PLANNER_TRACK":
-            # 方向丢失 → 回 reactive
             if planner is None or not planner.direction_valid:
                 state = "TRACK"
                 arrival_confirm = 0
             else:
-                # 距离 + 方位达标 → HOLD
                 in_distance = abs(distance_m - desired_distance_m) < DISTANCE_TOLERANCE_M
                 if in_distance and abs_bearing < BEARING_TOLERANCE_DEG:
                     arrival_confirm += 1
@@ -394,7 +354,6 @@ async def visual_tracking_control(drone, detector, desired_distance_m, track_dur
             in_distance = abs(distance_m - desired_distance_m) < DISTANCE_TOLERANCE_M
             in_bearing = abs_bearing < BEARING_TOLERANCE_DEG
             if not (in_distance and in_bearing):
-                # 有 planner 且方向有效 → 优先回 PLANNER_TRACK
                 if planner is not None and planner.direction_valid:
                     state = "PLANNER_TRACK"
                 else:
@@ -413,7 +372,6 @@ async def visual_tracking_control(drone, detector, desired_distance_m, track_dur
             forward = -retreat_speed
 
         elif state == "ALIGN":
-            # 对齐 yaw 的同时对距离做 P 控制（前进+后退）
             distance_error = distance_m - desired_distance_m
             if abs(distance_error) > DISTANCE_DEADBAND_M:
                 forward = clamp(
@@ -436,13 +394,7 @@ async def visual_tracking_control(drone, detector, desired_distance_m, track_dur
                 yaw_rate = clamp(KP_BEARING_YAW * bearing_deg, -max_yaw, max_yaw)
 
         elif state == "PLANNER_TRACK":
-            # ── 方向管 yaw，距离管 forward，安全优先 ──
-            #
-            # yaw: 朝 planner 给的追踪方向（目标预测位置方向）
-            # forward: 距离控制器，以 desired_distance_m 为目标，同 TRACK
-
             if planner is not None and planner.direction_valid:
-                # ── yaw: 朝目标预测位置方向 ──
                 predict_n = planner.target_n + planner.target_vel_n * TARGET_PREDICT_TIME_S
                 predict_e = planner.target_e + planner.target_vel_e * TARGET_PREDICT_TIME_S
                 if drone_position_provider is not None:
@@ -461,7 +413,6 @@ async def visual_tracking_control(drone, detector, desired_distance_m, track_dur
                     if abs_bearing > BEARING_DEADBAND_DEG:
                         yaw_rate = clamp(KP_BEARING_YAW * bearing_deg, -max_yaw, max_yaw)
 
-                # ── forward: 距离控制器，以 desired 为主 ──
                 distance_error = distance_m - desired_distance_m
                 if distance_m > 0 and abs(distance_error) > DISTANCE_DEADBAND_M:
                     forward = clamp(
@@ -469,7 +420,6 @@ async def visual_tracking_control(drone, detector, desired_distance_m, track_dur
                         -PLANNER_MAX_RETREAT, PLANNER_MAX_FORWARD
                     )
             else:
-                # 方向无效，降级到视觉 bearing
                 if abs_bearing > BEARING_DEADBAND_DEG:
                     yaw_rate = clamp(KP_BEARING_YAW * bearing_deg, -max_yaw, max_yaw)
 
