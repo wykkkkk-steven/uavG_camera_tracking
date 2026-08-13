@@ -14,7 +14,7 @@ import time
 
 from mavsdk.offboard import VelocityBodyYawspeed
 
-from test_params import (
+from .test_params import (
     CONTROL_HZ,
     SEARCH_YAW_RATE_DEG_S, SEARCH_TIMEOUT_S, SEARCH_CONFIRM_MIN_FRAMES,
     APPROACH_YAW_RATE_DEG_S, APPROACH_FORWARD_SPEED, APPROACH_ENTER_RANGE_M,
@@ -33,10 +33,12 @@ from test_params import (
     AREA_JUMP_RATIO, PREVIEW_MAX_DURATION_S, PREVIEW_RECOVER_RATIO,
     TARGET_LOST_HOVER_S, TARGET_LOST_LAND_S,
     LOST_YAW_SEARCH_RATE_DEG_S, LOOMING_MIN_AREA,
-    PLANNER_KP_XY, PLANNER_MAX_SPEED_M_S, PLANNER_ARRIVE_RADIUS_M,
-    PLANNER_YAW_TO_WAYPOINT, PLANNER_KP_YAW,
+    PLANNER_KP_YAW,
+    PLANNER_KP_DIST,
+    PLANNER_MAX_FORWARD, PLANNER_MAX_RETREAT,
+    TARGET_PREDICT_TIME_S,
 )
-from test_utils import clamp, slew_limit
+from .test_utils import clamp, slew_limit
 
 
 # ================================================================
@@ -357,8 +359,8 @@ async def visual_tracking_control(drone, detector, desired_distance_m, track_dur
             if abs_bearing < ALIGN_BEARING_DEG:
                 align_confirm += 1
                 if align_confirm >= ALIGN_CONFIRM_FRAMES:
-                    # 有 planner 且航点有效 → 进 PLANNER_TRACK，否则进 TRACK
-                    if planner is not None and planner.follow_valid:
+                    # 有 planner 且方向有效 → 进 PLANNER_TRACK，否则进 TRACK
+                    if planner is not None and planner.direction_valid:
                         state = "PLANNER_TRACK"
                         arrival_confirm = 0
                     else:
@@ -366,16 +368,14 @@ async def visual_tracking_control(drone, detector, desired_distance_m, track_dur
             else:
                 align_confirm = 0
         elif state == "PLANNER_TRACK":
-            # 航点丢失 → 回 reactive
-            if planner is None or not planner.follow_valid:
+            # 方向丢失 → 回 reactive
+            if planner is None or not planner.direction_valid:
                 state = "TRACK"
                 arrival_confirm = 0
             else:
-                # 航点到达判定
-                wp_err_n = planner.follow_n - (drone_position_provider()[0] if drone_position_provider else 0)
-                wp_err_e = planner.follow_e - (drone_position_provider()[1] if drone_position_provider else 0)
-                wp_dist = math.sqrt(wp_err_n ** 2 + wp_err_e ** 2)
-                if wp_dist < PLANNER_ARRIVE_RADIUS_M:
+                # 距离 + 方位达标 → HOLD
+                in_distance = abs(distance_m - desired_distance_m) < DISTANCE_TOLERANCE_M
+                if in_distance and abs_bearing < BEARING_TOLERANCE_DEG:
                     arrival_confirm += 1
                     if arrival_confirm >= ARRIVAL_CONFIRM_FRAMES:
                         state = "HOLD"
@@ -394,8 +394,8 @@ async def visual_tracking_control(drone, detector, desired_distance_m, track_dur
             in_distance = abs(distance_m - desired_distance_m) < DISTANCE_TOLERANCE_M
             in_bearing = abs_bearing < BEARING_TOLERANCE_DEG
             if not (in_distance and in_bearing):
-                # 有 planner 且航点有效 → 优先回 PLANNER_TRACK
-                if planner is not None and planner.follow_valid:
+                # 有 planner 且方向有效 → 优先回 PLANNER_TRACK
+                if planner is not None and planner.direction_valid:
                     state = "PLANNER_TRACK"
                 else:
                     state = "TRACK"
@@ -413,6 +413,14 @@ async def visual_tracking_control(drone, detector, desired_distance_m, track_dur
             forward = -retreat_speed
 
         elif state == "ALIGN":
+            # 对齐 yaw 的同时对距离做 P 控制（前进+后退）
+            distance_error = distance_m - desired_distance_m
+            if abs(distance_error) > DISTANCE_DEADBAND_M:
+                forward = clamp(
+                    kp_dist * distance_error,
+                    -MAX_TRACK_BACKWARD_SPEED,
+                    MAX_TRACK_FORWARD_SPEED,
+                )
             if abs_bearing > BEARING_DEADBAND_DEG:
                 yaw_rate = clamp(KP_BEARING_YAW * bearing_deg, -max_yaw, max_yaw)
 
@@ -428,33 +436,42 @@ async def visual_tracking_control(drone, detector, desired_distance_m, track_dur
                 yaw_rate = clamp(KP_BEARING_YAW * bearing_deg, -max_yaw, max_yaw)
 
         elif state == "PLANNER_TRACK":
-            # 航点跟踪：NE 误差 → body 系速度
-            if planner is not None and planner.follow_valid and drone_position_provider is not None:
-                try:
-                    dn, de, dh = drone_position_provider()
-                    err_n = planner.follow_n - dn
-                    err_e = planner.follow_e - de
-                    # NE → body 系：forward = err·heading, right = err·heading⊥
-                    heading_rad = math.radians(dh)
-                    forward_cmd = err_n * math.cos(heading_rad) + err_e * math.sin(heading_rad)
-                    right_cmd = -err_n * math.sin(heading_rad) + err_e * math.cos(heading_rad)
-                    # 纯 yaw+前后：right_speed=0，用 yaw 转向航点
-                    forward = clamp(PLANNER_KP_XY * forward_cmd,
-                                    -PLANNER_MAX_SPEED_M_S, PLANNER_MAX_SPEED_M_S)
-                    if PLANNER_YAW_TO_WAYPOINT:
-                        # 计算到航点的方位角偏差
-                        target_heading_to_wp = math.degrees(math.atan2(err_e, err_n))
-                        heading_err = target_heading_to_wp - dh
-                        # 归一化到 [-180, 180]
+            # ── 方向管 yaw，距离管 forward，安全优先 ──
+            #
+            # yaw: 朝 planner 给的追踪方向（目标预测位置方向）
+            # forward: 距离控制器，以 desired_distance_m 为目标，同 TRACK
+
+            if planner is not None and planner.direction_valid:
+                # ── yaw: 朝目标预测位置方向 ──
+                predict_n = planner.target_n + planner.target_vel_n * TARGET_PREDICT_TIME_S
+                predict_e = planner.target_e + planner.target_vel_e * TARGET_PREDICT_TIME_S
+                if drone_position_provider is not None:
+                    try:
+                        dn, de, dh = drone_position_provider()
+                        err_n = predict_n - dn
+                        err_e = predict_e - de
+                        target_heading = math.degrees(math.atan2(err_e, err_n))
+                        heading_err = target_heading - dh
                         heading_err = (heading_err + 180) % 360 - 180
                         yaw_rate = clamp(PLANNER_KP_YAW * heading_err, -max_yaw, max_yaw)
-                    else:
-                        # 仅对准视觉目标
+                    except Exception:
                         if abs_bearing > BEARING_DEADBAND_DEG:
                             yaw_rate = clamp(KP_BEARING_YAW * bearing_deg, -max_yaw, max_yaw)
-                except Exception:
-                    forward = 0.0
-                    yaw_rate = 0.0
+                else:
+                    if abs_bearing > BEARING_DEADBAND_DEG:
+                        yaw_rate = clamp(KP_BEARING_YAW * bearing_deg, -max_yaw, max_yaw)
+
+                # ── forward: 距离控制器，以 desired 为主 ──
+                distance_error = distance_m - desired_distance_m
+                if distance_m > 0 and abs(distance_error) > DISTANCE_DEADBAND_M:
+                    forward = clamp(
+                        PLANNER_KP_DIST * distance_error,
+                        -PLANNER_MAX_RETREAT, PLANNER_MAX_FORWARD
+                    )
+            else:
+                # 方向无效，降级到视觉 bearing
+                if abs_bearing > BEARING_DEADBAND_DEG:
+                    yaw_rate = clamp(KP_BEARING_YAW * bearing_deg, -max_yaw, max_yaw)
 
         elif state == "HOLD":
             forward = 0.0
@@ -471,11 +488,11 @@ async def visual_tracking_control(drone, detector, desired_distance_m, track_dur
             state_str = "PREVIEW" if preview_active else state
             rr_str = f" rr={range_rate:.2f}" if abs(range_rate) > 0.01 else ""
             planner_str = ""
-            if state == "PLANNER_TRACK" and planner is not None and planner.follow_valid:
+            if state == "PLANNER_TRACK" and planner is not None and planner.direction_valid:
                 try:
                     dn, de, _ = drone_position_provider()
-                    wp_d = math.sqrt((planner.follow_n - dn)**2 + (planner.follow_e - de)**2)
-                    planner_str = f" wp_d={wp_d:.2f}m"
+                    tgt_d = math.sqrt((planner.target_n - dn)**2 + (planner.target_e - de)**2)
+                    planner_str = f" tgt_d={tgt_d:.2f}m"
                 except Exception:
                     pass
             print(
