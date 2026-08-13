@@ -103,6 +103,7 @@ async def search_until_target_found(drone, detector, stop_event=None, land_event
             if confirm_count >= SEARCH_CONFIRM_MIN_FRAMES:
                 dist_str = f"{detector.distance_m:.1f}m" if detector.distance_m > 0 else f">{DISTANCE_MAX_VALID_M}m(远距)"
                 print(f"[搜索] 目标确认! bearing={detector.bearing_deg:.1f}° dist={dist_str}")
+                await sender.send(drone, 0, 0)
                 return "found"
         else:
             confirm_count = 0
