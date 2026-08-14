@@ -4,8 +4,6 @@
 
 import asyncio
 import math
-import select
-import sys
 import time
 
 from mavsdk.offboard import VelocityBodyYawspeed
@@ -59,15 +57,6 @@ class _VelocitySender:
                     self._land_event.set()
 
 
-def _check_stdin_command(stop_event, land_event):
-    """非阻塞检查 stdin，如果用户输入 land/stop/0 则设置事件。"""
-    if select.select([sys.stdin], [], [], 0.0)[0]:
-        line = sys.stdin.readline().strip().lower()
-        if line in ("land", "stop", "0"):
-            land_event.set()
-            stop_event.set()
-            return True
-    return False
 
 
 async def search_until_target_found(drone, detector, stop_event=None, land_event=None):
@@ -87,8 +76,7 @@ async def search_until_target_found(drone, detector, stop_event=None, land_event
         if stop_event is not None and stop_event.is_set():
             return "land"
 
-        if _check_stdin_command(stop_event, land_event):
-            return "land"
+
 
         if detector.target_found:
             confirm_count += 1
@@ -119,8 +107,6 @@ async def approach_until_in_range(drone, detector, stop_event=None, land_event=N
         if stop_event is not None and stop_event.is_set():
             return "land"
 
-        if _check_stdin_command(stop_event, land_event):
-            return "land"
 
         if not detector.target_found:
             print("[接近] 目标丢失")
@@ -182,8 +168,6 @@ async def visual_tracking_control(drone, detector, desired_distance_m, track_dur
         if stop_event is not None and stop_event.is_set():
             return "land"
 
-        if _check_stdin_command(stop_event, land_event):
-            return "land"
 
         target_found = detector.target_found
         ema_distance_m = detector.distance_m
@@ -227,6 +211,14 @@ async def visual_tracking_control(drone, detector, desired_distance_m, track_dur
             lost_time_start = None
 
         distance_valid = ema_distance_m > 0
+        if not distance_valid:
+            prev_forward = slew_limit(0.0, prev_forward, FORWARD_SLEW_OPTIMAL_M_S2, dt)
+            prev_yaw_rate = slew_limit(0.0, prev_yaw_rate, YAW_SLEW_OPTIMAL_DEG_S2, dt)
+            await sender.send(drone, prev_forward, prev_yaw_rate)
+            prev_area_for_jump = None
+            await asyncio.sleep(dt)
+            continue
+
         if distance_valid and ema_distance_m > DISTANCE_MAX_VALID_M:
             yaw_rate = clamp(KP_BEARING_YAW * bearing_deg,
                              -APPROACH_YAW_RATE_DEG_S, APPROACH_YAW_RATE_DEG_S)
