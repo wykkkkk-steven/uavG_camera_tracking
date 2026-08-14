@@ -1,7 +1,6 @@
 """
 检测器
 YOLO 检测 + bbox 张角法测距 + Looming 测速
-（需要接入正确的yolo模型）
 """
 
 import asyncio
@@ -231,11 +230,14 @@ class YOLODetectorNode(Node):
 
         raw_distance, conf = compute_distance_from_bbox(w, h, self._fx, self._fy)
 
-        #不退回搜索状态，避免和距离测算混在一起
         if raw_distance is None:
             self.raw_distance_m = 0.0
             self.distance_m = 0.0
             self.target_distance_m = None
+            self._filtered_distance = None
+            self._prev_area = None
+            self._prev_area_time = None
+            self.range_rate = 0.0
             return
 
         self.raw_distance_m = raw_distance
