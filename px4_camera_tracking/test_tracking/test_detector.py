@@ -27,7 +27,6 @@ from .test_params import (
 # 张角法测距
 # ================================================================
 def interpolate_target_size(bbox_w, bbox_h):
-    """根据 bbox 宽高比插值目标真实投影尺寸。"""
     if bbox_h < 1:
         return DEFAULT_TARGET_SIZE
 
@@ -52,10 +51,6 @@ def interpolate_target_size(bbox_w, bbox_h):
 
 
 def compute_distance_from_bbox(bbox_w, bbox_h, fx, fy):
-    """
-    bbox 张角法测距。宽高比插值 → 真实尺寸 → 距离。
-    返回: (distance_m, confidence)
-    """
     if bbox_w < 3 or bbox_h < 3:
         return None, 0.0
 
@@ -87,9 +82,6 @@ def compute_distance_from_bbox(bbox_w, bbox_h, fx, fy):
     return distance, confidence
 
 
-# ================================================================
-# YOLO 检测器节点
-# ================================================================
 class YOLODetectorNode(Node):
     """
     YOLO 检测 + bbox 张角法测距 + Looming 测速。
@@ -124,12 +116,10 @@ class YOLODetectorNode(Node):
             Image, IMAGE_TOPIC, self._image_callback, 10
         )
 
-        # 相机内参
         self._fx = None
         self._fy = None
         self._camera_info_received = False
 
-        # ── 对外状态 ──
         self.target_found = False
         self.bbox = (0, 0, 0, 0)
         self.distance_m = 0.0
@@ -140,24 +130,20 @@ class YOLODetectorNode(Node):
         self.area = 0.0
         self.image_size = (640, 480)
 
-        # uavG 兼容属性
         self.error_x = 0.0
         self.image_w = 640
         self.target_distance_m = None
         self.target_bearing_deg = 0.0
 
-        # EMA 距离滤波
         self._filtered_distance = None
         self._alpha_base = 0.4
 
-        # Looming
         self._prev_area = None
         self._prev_area_time = None
 
         self.lost_frame_count = 0
         self.get_logger().info("YOLODetectorNode 已初始化")
 
-    # ── YOLO 模型懒加载 ──
     def _ensure_yolo_model(self):
         if self._yolo_model is None:
             try:
@@ -168,7 +154,6 @@ class YOLODetectorNode(Node):
                 self.get_logger().error(f"YOLO 模型加载失败 [{self._yolo_model_path}]: {e}")
                 raise
 
-    # ── 相机内参 ──
     def _camera_info_callback(self, msg: CameraInfo):
         K = np.array(msg.k, dtype=np.float64).reshape(3, 3)
         self._fx = float(K[0, 0])
@@ -184,13 +169,12 @@ class YOLODetectorNode(Node):
         self._camera_info_received = True
         self.get_logger().warn("无 camera_info，用 90° FOV 估算内参")
 
-    # ── 图像回调（核心） ──
     def _image_callback(self, msg: Image):
         if self._yolo_model is None:
             try:
                 self._ensure_yolo_model()
             except Exception:
-                return  # 模型加载失败，跳过本帧
+                return
 
         try:
             frame = self._bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
@@ -245,11 +229,13 @@ class YOLODetectorNode(Node):
         target_cx = x1 + w / 2.0
         self.error_x = target_cx - img_w / 2.0
 
-        # ── 张角法测距 ──
         raw_distance, conf = compute_distance_from_bbox(w, h, self._fx, self._fy)
 
+        #不退回搜索状态，避免和距离测算混在一起
         if raw_distance is None:
-            self._mark_target_lost()
+            self.raw_distance_m = 0.0
+            self.distance_m = 0.0
+            self.target_distance_m = None
             return
 
         self.raw_distance_m = raw_distance
@@ -266,15 +252,12 @@ class YOLODetectorNode(Node):
 
         self.target_distance_m = self.distance_m
 
-        # ── Bearing ──
         if self._fx and self._fx > 0:
             self.bearing_deg = math.degrees(math.atan2(self.error_x, self._fx))
         else:
             self.bearing_deg = 0.0
         self.target_bearing_deg = self.bearing_deg
 
-        # ── Looming → range_rate ──
-        # bbox 出画面边界时跳过 Looming
         bbox_touches_edge = (
             x1 <= 2 or y1 <= 2 or x2 >= img_w - 2 or y2 >= img_h - 2
         )
