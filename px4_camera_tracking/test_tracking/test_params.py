@@ -22,7 +22,7 @@ SEARCH_CONFIRM_MIN_FRAMES = 2
 
 # 目标丢失保护
 TARGET_LOST_HOVER_S = 2.0
-TARGET_LOST_LAND_S = 20.0
+TARGET_LOST_LAND_S = 50.0
 
 # ================================================================
 # 远距识别 → 接近参数（50m 识别后向目标飞近）
@@ -34,11 +34,11 @@ APPROACH_ENTER_RANGE_M = 7.5       # 进入此距离后切换为精细跟踪
 # ================================================================
 # 距离分层参数
 # ================================================================
-DISTANCE_MIN_SAFE_M = 1.0          # 最低安全距离
+DISTANCE_MIN_SAFE_M = 0.5          # 最低安全距离
 DISTANCE_OPTIMAL_MIN_M = 2.0       # 最佳区间下限
 DISTANCE_OPTIMAL_MAX_M = 5.0       # 最佳区间上限
 DISTANCE_MAX_VALID_M = 7.5         # 最大有效追踪距离
-DISTANCE_DEFAULT_M = 3.5           # 默认期望距离
+DISTANCE_DEFAULT_M = 2.0           # 默认期望距离
 
 # ================================================================
 # 距离控制参数
@@ -93,7 +93,7 @@ ARRIVAL_CONFIRM_FRAMES = 5
 # ================================================================
 # URGENT 后退
 # ================================================================
-URGENT_TOO_CLOSE_MARGIN_M = 0.80
+URGENT_TOO_CLOSE_MARGIN_M = 0.30
 URGENT_CLOSING_SPEED_M_S = 0.70
 URGENT_CONFIRM_FRAMES = 3
 URGENT_RETREAT_MIN_SPEED = 0.20
@@ -165,7 +165,7 @@ KF_PROCESS_NOISE_VEL = 0.10         # Q: 速度过程噪声（(m/s)²）
 KF_MEASUREMENT_NOISE_POS = 0.25     # R: 位置观测噪声（m²，仿真较小）
 KF_INITIAL_COV_POS = 10.0           # P0: 位置初始协方差
 KF_INITIAL_COV_VEL = 5.0            # P0: 速度初始协方差
-KF_WARMUP_FRAMES = 10              # 暖机帧数（20帧≈2秒）：前N帧输出YOLO原始值，KF后台跑
+KF_WARMUP_FRAMES = 20              # 暖机帧数（20帧≈2秒）：前N帧输出YOLO原始值，KF后台跑
 KF_MAX_DT_S = 0.5                  # dt 跳变保护：超过此值则截断（目标丢失恢复后）
 
 # ================================================================
