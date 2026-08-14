@@ -330,6 +330,8 @@ async def visual_tracking_control(drone, detector, desired_distance_m, track_dur
                 URGENT_RETREAT_MAX_SPEED,
             )
             forward = -retreat_speed
+            if abs_bearing > BEARING_DEADBAND_DEG:
+                yaw_rate = clamp(KP_BEARING_YAW * bearing_deg, -max_yaw, max_yaw)
 
         elif state == "ALIGN":
             distance_error = distance_m - desired_distance_m
