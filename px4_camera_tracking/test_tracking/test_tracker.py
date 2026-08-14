@@ -11,7 +11,7 @@ from mavsdk.offboard import VelocityBodyYawspeed
 from .test_params import (
     CONTROL_HZ,
     SEARCH_YAW_RATE_DEG_S, SEARCH_TIMEOUT_S, SEARCH_CONFIRM_MIN_FRAMES,
-    APPROACH_YAW_RATE_DEG_S, APPROACH_FORWARD_SPEED, APPROACH_ENTER_RANGE_M,
+    APPROACH_YAW_RATE_DEG_S, APPROACH_FORWARD_SPEED,
     DISTANCE_MIN_SAFE_M, DISTANCE_OPTIMAL_MIN_M, DISTANCE_OPTIMAL_MAX_M,
     DISTANCE_MAX_VALID_M,
     KP_DISTANCE_CLOSE, KP_DISTANCE_OPTIMAL, KP_DISTANCE_FAR, DISTANCE_DEADBAND_M,
@@ -92,42 +92,6 @@ async def search_until_target_found(drone, detector, stop_event=None, land_event
         await asyncio.sleep(dt)
 
 
-async def approach_until_in_range(drone, detector, stop_event=None, land_event=None):
-    """
-    远距识别到目标后，向目标飞近直到进入测距范围。
-    返回: 'in_range' / 'lost' / 'land'
-    """
-    print("[接近] 目标远距，向目标飞近...")
-    dt = 1.0 / CONTROL_HZ
-    sender = _VelocitySender(land_event)
-
-    while True:
-        if land_event is not None and land_event.is_set():
-            return "land"
-        if stop_event is not None and stop_event.is_set():
-            return "land"
-
-
-        if not detector.target_found:
-            print("[接近] 目标丢失")
-            return "lost"
-
-        if detector.distance_m > 0 and detector.distance_m <= APPROACH_ENTER_RANGE_M:
-            print(f"[接近] 进入测距范围 dist={detector.distance_m:.1f}m")
-            return "in_range"
-
-        bearing_deg = detector.bearing_deg
-        yaw_rate = clamp(
-            KP_BEARING_YAW * bearing_deg,
-            -APPROACH_YAW_RATE_DEG_S,
-            APPROACH_YAW_RATE_DEG_S,
-        )
-        forward = APPROACH_FORWARD_SPEED
-
-        await sender.send(drone, forward, yaw_rate)
-        await asyncio.sleep(dt)
-
-
 async def visual_tracking_control(drone, detector, desired_distance_m, track_duration_s,
                                   stop_event=None, land_event=None,
                                   planner=None, drone_position_provider=None):
@@ -175,13 +139,6 @@ async def visual_tracking_control(drone, detector, desired_distance_m, track_dur
         range_rate = detector.range_rate
         current_area = detector.area
 
-        if planner is not None and drone_position_provider is not None and target_found:
-            try:
-                dn, de, dh = drone_position_provider()
-                planner.update(bearing_deg, ema_distance_m, dn, de, dh)
-            except Exception as e:
-                if time.time() - last_log_time > 2.0:
-                    print(f"[WARN] Planner update 失败: {e}")
 
         if not target_found:
             if planner is not None:
@@ -211,13 +168,24 @@ async def visual_tracking_control(drone, detector, desired_distance_m, track_dur
             lost_time_start = None
 
         distance_valid = ema_distance_m > 0
+
         if not distance_valid:
+            if planner is not None:
+                planner.mark_target_lost()
             prev_forward = slew_limit(0.0, prev_forward, FORWARD_SLEW_OPTIMAL_M_S2, dt)
             prev_yaw_rate = slew_limit(0.0, prev_yaw_rate, YAW_SLEW_OPTIMAL_DEG_S2, dt)
             await sender.send(drone, prev_forward, prev_yaw_rate)
             prev_area_for_jump = None
             await asyncio.sleep(dt)
             continue
+
+        if planner is not None and drone_position_provider is not None:
+            try:
+                dn, de, dh = drone_position_provider()
+                planner.update(bearing_deg, ema_distance_m, dn, de, dh)
+            except Exception as e:
+                if time.time() - last_log_time > 2.0:
+                    print(f"[WARN] Planner update 失败: {e}")
 
         if distance_valid and ema_distance_m > DISTANCE_MAX_VALID_M:
             yaw_rate = clamp(KP_BEARING_YAW * bearing_deg,
