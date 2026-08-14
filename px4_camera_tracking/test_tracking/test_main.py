@@ -25,7 +25,6 @@ from .test_flight import (
 from .test_detector import YOLODetectorNode, spin_ros_node
 from .test_tracker import (
     search_until_target_found,
-    approach_until_in_range,
     visual_tracking_control,
 )
 from .test_planner import TargetPositionEstimator
@@ -82,6 +81,7 @@ async def ask_track_duration(stop_event, land_event):
 
 async def ask_desired_distance(stop_event, land_event):
     value = await ask_float(
+        "请输入期望跟踪距离 desired_distance_m，单位 m，例如 3.5",
         default_value=DISTANCE_DEFAULT_M,
         min_value=1.0,
         max_value=DISTANCE_MAX_VALID_M,
@@ -147,6 +147,9 @@ async def main_async():
 
             cmd_task = asyncio.create_task(command_listener(stop_event, land_event))
 
+            # 位置提供器：供 planner 使用
+            # pipeline 模式：每帧调用 ensure_future 触发异步更新，
+            # 读上一次更新的结果（延迟一帧≈100ms，10Hz下可接受）
             _pos_cache = {"n": 0.0, "e": 0.0, "h": 0.0, "pending": False}
 
             async def _update_pos_cache():
@@ -191,16 +194,6 @@ async def main_async():
             if search_result != "found":
                 print("[WAIT] 搜索未找到目标，返回悬停等待")
                 continue
-
-            approach_result = await approach_until_in_range(
-                drone, detector, stop_event, land_event,
-            )
-
-            if approach_result == "lost":
-                print("[WAIT] 接近过程中目标丢失，返回悬停等待")
-                continue
-            if approach_result == "land":
-                break
 
             track_duration_s = await ask_track_duration(stop_event, land_event)
             if track_duration_s is None:
