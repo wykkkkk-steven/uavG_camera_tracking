@@ -1,26 +1,5 @@
 """
-五面 ArUco 正方体目标面追踪（绝对方向方案）
-
-目标面 = 运行时锁定第一个检测到的侧面，之后固定。
-方向 = 静态映射表 TARGET_RELATION（锁定时由 face_graph 预计算），
-       运行时只查表，不做动态 BFS / 姿态累积 / 历史推断。
-
-输入（每帧）:
-    detections: [ {id, area, corners, rvec, tvec}, ... ]
-
-输出:
-    {
-        "state": "TARGET_TRACK" / "FIND_TARGET" / "LOST_CONFIRM",
-        "target_visible": bool,
-        "target_id": int,
-        "current_face": int,
-        "target_direction": "LEFT"/"RIGHT"/"BACK"/"UP"/"DOWN"/"CENTER"/"NONE",
-        "yaw_error": float,      # 目标面中心相对图像中心（弧度，基于 fx）
-        "distance": float,       # 目标面 tvec 模长
-        "angle_error": float     # 目标面法线与相机光轴的夹角（度）
-    }
-
-视觉模块只输出信息，不决定飞行控制。
+五面 ArUco 正方体目标面追踪
 """
 
 import math
@@ -180,7 +159,8 @@ class TargetFaceTracker:
 
             corners = det.get("corners")
             if corners is not None and image_w and fx and fx > 0:
-                cx = float(corners.reshape(-1, 2)[:, 0].mean())
+                corners_arr = np.asarray(corners, dtype=np.float64).reshape(-1, 2)
+                cx = float(corners_arr[:, 0].mean())
                 yaw_error = math.atan((cx - image_w / 2.0) / fx)
 
             tvec = det.get("tvec")
@@ -274,6 +254,14 @@ class TargetFaceTracker:
                     "angle_error": angle_error,
                 }
             )
+            return result
+
+        if target_visible:
+            result["state"] = self.state
+            result["target_visible"] = True
+            result["current_face"] = self.current_face
+            if self.state == "TARGET_TRACK":
+                result["target_direction"] = "CENTER"
             return result
 
         if not visible_ids:
