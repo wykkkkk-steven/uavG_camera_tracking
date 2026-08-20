@@ -1891,8 +1891,8 @@ async def visual_orbit_control(
     land_event,
 ):
     print("\n[TRACK-BOARD-NORMAL] 开始整板 ChArUco tracking")
-    print("[TRACK-BOARD-NORMAL] ALIGN 后移动到板法向正前方指定距离")
-    print("[TRACK-BOARD-NORMAL] right_speed 仅用于法向观察点纠偏，不再绕飞")
+    print("[TRACK-BOARD-NORMAL] 直接追踪：yaw 用画面偏移对准，forward 用距离误差")
+    print("[TRACK-BOARD-NORMAL] right_speed=0，不要求预对准")
 
     dt = 1.0 / CONTROL_HZ
     track_start = time.time()
@@ -2113,6 +2113,17 @@ async def visual_orbit_control(
             detector.target_distance_m - desired_distance_m
         )
 
+        if detector.image_w > 0:
+            half_width = detector.image_w / 2.0
+            pixel_ratio = detector.error_x / max(half_width, 1.0)
+            target_yaw = clamp(
+                KP_YAW_NORM * pixel_ratio,
+                -MAX_TRACK_YAW_RATE_DEG_S,
+                MAX_TRACK_YAW_RATE_DEG_S,
+            )
+        else:
+            target_yaw = 0.0
+
         if urgent:
             retreat_speed = clamp(
                 URGENT_RETREAT_KP
@@ -2150,17 +2161,6 @@ async def visual_orbit_control(
             mode = "URGENT_RETREAT"
 
         else:
-            if detector.image_w > 0:
-                half_width = detector.image_w / 2.0
-                pixel_ratio = detector.error_x / max(half_width, 1.0)
-                target_yaw = clamp(
-                    KP_YAW_NORM * pixel_ratio,
-                    -MAX_TRACK_YAW_RATE_DEG_S,
-                    MAX_TRACK_YAW_RATE_DEG_S,
-                )
-            else:
-                target_yaw = 0.0
-
             target_forward = clamp(
                 KP_OBSERVATION_POINT * distance_error_m
                 + VELOCITY_FEEDFORWARD_GAIN
