@@ -15,6 +15,8 @@ from sensor_msgs.msg import Image, CameraInfo
 from mavsdk import System
 from mavsdk.offboard import OffboardError, VelocityBodyYawspeed, PositionNedYaw
 
+from target_face_tracker import TargetFaceTracker
+
 
 # ================= 基本连接参数 =================
 UDP_ADDR = "udpin://0.0.0.0:14540"
@@ -38,7 +40,7 @@ SEARCH_CONFIRM_MIN_FRAMES = 2
 
 # orbit 中目标丢失保护
 TARGET_LOST_HOVER_S = 2.0
-TARGET_LOST_LAND_S = 20.0
+TARGET_LOST_LAND_S = 50.0
 
 # OpenCV 视觉控制参数
 KP_YAW = 0.10
@@ -69,7 +71,7 @@ CHARUCO_SQUARE_LENGTH_M = 3.0 / 7.0
 CHARUCO_MARKER_LENGTH_M = 0.30
 CHARUCO_LEGACY_PATTERN = False
 
-DEFAULT_DESIRED_DISTANCE_M = 7.5
+DEFAULT_DESIRED_DISTANCE_M = 2.0
 MAX_VALID_MONO_DISTANCE_M = 30.0
 MIN_CHARUCO_CORNERS_FOR_POSE = 4
 POSE_MAX_REPROJECTION_ERROR_PX = 8.0
@@ -102,7 +104,7 @@ TARGET_VELOCITY_FILTER_ALPHA = 0.25
 MAX_PREDICT_SPEED_M_S = 2.0
 VELOCITY_FEEDFORWARD_GAIN = 0.70
 
-URGENT_TOO_CLOSE_MARGIN_M = 0.80
+URGENT_TOO_CLOSE_MARGIN_M = 0.30
 URGENT_CLOSING_SPEED_M_S = 0.70
 URGENT_CONFIRM_FRAMES = 3
 URGENT_RETREAT_MIN_SPEED = 0.20
@@ -134,7 +136,7 @@ PLANNER_KP_DIST = 0.30
 PLANNER_MAX_FORWARD = 1.0
 PLANNER_MAX_RETREAT = 0.75
 PLANNER_DEADBAND_M = 0.5
-PLANNER_SAFE_DISTANCE_M = 1.0
+PLANNER_SAFE_DISTANCE_M = 0.5
 PLANNER_PREDICT_TIME_S = 0.25
 PLANNER_FF_GAIN = 0.70
 
@@ -166,6 +168,10 @@ TARGET_MARKER_IDS = {0, 1, 2, 3, 4}
 ARUCO_MARKER_LENGTH_M = 0.320
 MIN_MARKER_AREA = 60.0
 DEBUG_ARUCO_DETECTION = False
+
+# Face-direction tracking: target face is locked at runtime (first detected
+# side face). This is the yaw search speed used while the target is occluded.
+FACE_ROTATE_YAW_RATE_DEG_S = 20.0
 
 # Image-edge safety: if the target is going out of the bottom of the camera view,
 # do not trust area; back off horizontally.
@@ -898,6 +904,9 @@ class CharucoTargetDetector(Node):
 
         self.bridge = CvBridge()
 
+        self.face_tracker = TargetFaceTracker()
+        self.face_result = None
+
         self.target_found = False
         self.board_pose_valid = False
         self.error_x = 0.0
@@ -1162,6 +1171,7 @@ class CharucoTargetDetector(Node):
                     f"{msg.width}x{msg.height}"
                 )
             self._mark_target_lost()
+            self.face_result = self.face_tracker.update([])
             return
 
         valid_corners = []
@@ -1169,6 +1179,8 @@ class CharucoTargetDetector(Node):
         all_points = []
         best_marker_corners = None
         best_marker_area = 0.0
+        target_marker_corners = None
+        detections = []
 
         for marker_corners, marker_id in zip(corners, ids.flatten()):
             if (
@@ -1187,14 +1199,25 @@ class CharucoTargetDetector(Node):
             )
             valid_ids.append([int(marker_id)])
             all_points.append(points)
+            detections.append(
+                {"id": int(marker_id), "area": float(marker_area)}
+            )
 
+            if (
+                self.face_tracker.target_id is not None
+                and int(marker_id) == self.face_tracker.target_id
+            ):
+                target_marker_corners = points
             if marker_area > best_marker_area:
                 best_marker_area = marker_area
                 best_marker_corners = points
 
         if not valid_corners:
             self._mark_target_lost()
+            self.face_result = self.face_tracker.update([])
             return
+
+        self.face_result = self.face_tracker.update(detections)
 
         valid_ids = np.asarray(valid_ids, dtype=np.int32)
         stacked_points = np.vstack(all_points)
@@ -1204,6 +1227,7 @@ class CharucoTargetDetector(Node):
         )
         if w <= 0 or h <= 0:
             self._mark_target_lost()
+            self.face_result = self.face_tracker.update([])
             return
 
         self.bbox_x = x
@@ -1246,7 +1270,10 @@ class CharucoTargetDetector(Node):
                 charuco_ids,
             )
         else:
-            self._estimate_single_marker_pose(best_marker_corners)
+            if target_marker_corners is not None:
+                self._estimate_single_marker_pose(target_marker_corners)
+            else:
+                self._estimate_single_marker_pose(best_marker_corners)
 
     def _estimate_whole_board_pose(
         self,
@@ -1858,6 +1885,36 @@ async def visual_orbit_control(
             detector.target_found
             and now - detector.last_seen_time < TARGET_LOST_HOVER_S
         )
+        face_result = getattr(detector, "face_result", None)
+        face_rotate = "NONE"
+        if face_result is not None and face_result["state"] == "FIND_TARGET":
+            face_rotate = face_result["target_direction"]
+
+        if face_rotate in ("LEFT", "RIGHT", "BACK"):
+            if face_rotate == "LEFT":
+                target_yaw = FACE_ROTATE_YAW_RATE_DEG_S
+            elif face_rotate == "RIGHT":
+                target_yaw = -FACE_ROTATE_YAW_RATE_DEG_S
+            else:
+                target_yaw = 2.0 * FACE_ROTATE_YAW_RATE_DEG_S
+            forward = slew_limit(0.0, last_forward, FORWARD_SLEW_M_S2, dt)
+            right = slew_limit(0.0, last_right, LATERAL_SLEW_M_S2, dt)
+            yaw = slew_limit(target_yaw, last_yaw, YAW_SLEW_DEG_S2, dt)
+            await drone.offboard.set_velocity_body(
+                VelocityBodyYawspeed(forward, right, 0.0, yaw)
+            )
+            last_forward = forward
+            last_right = right
+            last_yaw = yaw
+            if now - last_print > 0.5:
+                last_print = now
+                print(
+                    f"[FACE_{face_rotate}] 目标面被遮挡，"
+                    f"当前面={face_result.get('current_face')} Y={yaw:+.1f}"
+                )
+            await asyncio.sleep(dt)
+            continue
+
         pose_valid = (
             marker_visible
             and detector.board_pose_valid
@@ -2051,25 +2108,29 @@ async def visual_orbit_control(
                 URGENT_RETREAT_MAX_SPEED,
             )
 
-            horizontal_range = max(
-                math.hypot(predicted_x, predicted_z),
-                1e-3,
-            )
-            target_forward = (
-                -retreat_speed
-                * predicted_z
-                / horizontal_range
-            )
-            target_right = (
-                -retreat_speed
-                * predicted_x
-                / horizontal_range
-            )
-            target_right = clamp(
-                target_right,
-                -MAX_TRACK_LATERAL_SPEED,
-                MAX_TRACK_LATERAL_SPEED,
-            )
+            if radial_closing_speed < 0.0:
+                horizontal_range = max(
+                    math.hypot(predicted_x, predicted_z),
+                    1e-3,
+                )
+                target_forward = (
+                    -retreat_speed
+                    * predicted_z
+                    / horizontal_range
+                )
+                target_right = (
+                    -retreat_speed
+                    * predicted_x
+                    / horizontal_range
+                )
+                target_right = clamp(
+                    target_right,
+                    -MAX_TRACK_LATERAL_SPEED,
+                    MAX_TRACK_LATERAL_SPEED,
+                )
+            else:
+                target_forward = 0.0
+                target_right = 0.0
 
             mode = "URGENT_RETREAT"
             aligned = False
@@ -2257,6 +2318,36 @@ async def visual_kf_tracking(
             detector.target_found
             and now - detector.last_seen_time < TARGET_LOST_HOVER_S
         )
+        face_result = getattr(detector, "face_result", None)
+        face_rotate = "NONE"
+        if face_result is not None and face_result["state"] == "FIND_TARGET":
+            face_rotate = face_result["target_direction"]
+
+        if face_rotate in ("LEFT", "RIGHT", "BACK"):
+            if face_rotate == "LEFT":
+                target_yaw = FACE_ROTATE_YAW_RATE_DEG_S
+            elif face_rotate == "RIGHT":
+                target_yaw = -FACE_ROTATE_YAW_RATE_DEG_S
+            else:
+                target_yaw = 2.0 * FACE_ROTATE_YAW_RATE_DEG_S
+            forward = slew_limit(0.0, last_forward, FORWARD_SLEW_M_S2, dt)
+            right = slew_limit(0.0, last_right, LATERAL_SLEW_M_S2, dt)
+            yaw = slew_limit(target_yaw, last_yaw, YAW_SLEW_DEG_S2, dt)
+            await drone.offboard.set_velocity_body(
+                VelocityBodyYawspeed(forward, right, 0.0, yaw)
+            )
+            last_forward = forward
+            last_right = right
+            last_yaw = yaw
+            if now - last_print > 0.5:
+                last_print = now
+                print(
+                    f"[FACE_{face_rotate}] 目标面被遮挡，"
+                    f"当前面={face_result.get('current_face')} Y={yaw:+.1f}"
+                )
+            await asyncio.sleep(dt)
+            continue
+
         pose_valid = (
             marker_visible
             and detector.board_pose_valid
@@ -2448,7 +2539,17 @@ async def visual_kf_tracking(
                 URGENT_RETREAT_MIN_SPEED,
                 URGENT_RETREAT_MAX_SPEED,
             )
-            target_forward = -retreat_speed
+            # Radial closing speed from the KF velocity estimate:
+            # negative = target is approaching, positive = receding.
+            radial_speed = 0.0
+            if math.hypot(err_n, err_e) > 1e-3:
+                radial_speed = (
+                    use_vn * err_n + use_ve * err_e
+                ) / math.hypot(err_n, err_e)
+            if radial_speed < 0.0:
+                target_forward = -retreat_speed
+            else:
+                target_forward = 0.0
             target_right = PLANNER_FF_GAIN * ff_right
             mode = "KF_URGENT_RETREAT"
         else:
