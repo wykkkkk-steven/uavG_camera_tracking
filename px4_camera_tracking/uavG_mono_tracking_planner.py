@@ -950,6 +950,7 @@ class CharucoTargetDetector(Node):
 
         self.camera_matrix = None
         self.dist_coeffs = None
+        self._fx = 0.0
         self.camera_info_time = 0.0
 
         self.lost_frame_count = 0
@@ -1067,10 +1068,17 @@ class CharucoTargetDetector(Node):
         self.lost_frame_count += 1
 
     def camera_info_callback(self, msg):
+        if (
+            msg.k is None
+            or len(msg.k) < 9
+            or all(float(v) == 0.0 for v in msg.k)
+        ):
+            return
         self.camera_matrix = np.array(
             msg.k,
             dtype=np.float64
         ).reshape(3, 3)
+        self._fx = float(self.camera_matrix[0, 0])
 
         if len(msg.d) > 0:
             self.dist_coeffs = np.array(
@@ -1098,6 +1106,7 @@ class CharucoTargetDetector(Node):
             dtype=np.float64,
         )
         self.dist_coeffs = np.zeros((5, 1), dtype=np.float64)
+        self._fx = fx
 
     def _interpolate_charuco(self, gray, marker_corners, marker_ids):
         if self.charuco_detector is not None:
@@ -1200,7 +1209,11 @@ class CharucoTargetDetector(Node):
             valid_ids.append([int(marker_id)])
             all_points.append(points)
             detections.append(
-                {"id": int(marker_id), "area": float(marker_area)}
+                {
+                    "id": int(marker_id),
+                    "area": float(marker_area),
+                    "corners": points,
+                }
             )
 
             if (
@@ -1274,6 +1287,21 @@ class CharucoTargetDetector(Node):
                 self._estimate_single_marker_pose(target_marker_corners)
             else:
                 self._estimate_single_marker_pose(best_marker_corners)
+
+        # Fill pose quantities into the face result once solvePnP is available.
+        if (
+            self.face_result is not None
+            and self.face_result.get("state") == "TARGET_TRACK"
+            and self.board_pose_valid
+            and self.target_distance_m is not None
+        ):
+            self.face_result["distance"] = self.target_distance_m
+            if self._fx and self._fx > 0:
+                self.face_result["yaw_error"] = math.atan2(
+                    self.error_x, self._fx
+                )
+            if self.target_face_error_deg is not None:
+                self.face_result["angle_error"] = self.target_face_error_deg
 
     def _estimate_whole_board_pose(
         self,
@@ -1543,6 +1571,9 @@ class CharucoTargetDetector(Node):
 
 
 def reset_detector_tracking_state(detector):
+    detector.face_tracker.reset()
+    detector.face_result = None
+
     detector.target_found = False
     detector.board_pose_valid = False
 
@@ -1763,7 +1794,10 @@ async def search_until_target_found(drone, detector, stop_event, land_event):
         else:
             search_confirm_count = 0
 
-        if search_confirm_count >= SEARCH_CONFIRM_MIN_FRAMES:
+        if (
+            search_confirm_count >= SEARCH_CONFIRM_MIN_FRAMES
+            and detector.face_tracker.target_id is not None
+        ):
             print("[SEARCH] 已找到 ChArUco/ArUco 目标")
 
             dist_text = "None"
@@ -1799,7 +1833,8 @@ async def search_until_target_found(drone, detector, stop_event, land_event):
             last_print = now
             print(
                 f"[SEARCH] target not found → 原地 yaw search "
-                f"confirm={search_confirm_count}/{SEARCH_CONFIRM_MIN_FRAMES}"
+                f"confirm={search_confirm_count}/{SEARCH_CONFIRM_MIN_FRAMES} "
+                f"target_id={detector.face_tracker.target_id}"
             )
 
         await drone.offboard.set_velocity_body(
@@ -1887,16 +1922,24 @@ async def visual_orbit_control(
         )
         face_result = getattr(detector, "face_result", None)
         face_rotate = "NONE"
+        face_search = False
         if face_result is not None and face_result["state"] == "FIND_TARGET":
             face_rotate = face_result["target_direction"]
+            face_search = (
+                face_rotate == "NONE"
+                and not face_result.get("target_visible", False)
+                and face_result.get("current_face") is None
+            )
 
-        if face_rotate in ("LEFT", "RIGHT", "BACK"):
+        if face_rotate in ("LEFT", "RIGHT", "BACK") or face_search:
             if face_rotate == "LEFT":
-                target_yaw = FACE_ROTATE_YAW_RATE_DEG_S
-            elif face_rotate == "RIGHT":
                 target_yaw = -FACE_ROTATE_YAW_RATE_DEG_S
-            else:
+            elif face_rotate == "RIGHT":
+                target_yaw = FACE_ROTATE_YAW_RATE_DEG_S
+            elif face_rotate == "BACK":
                 target_yaw = 2.0 * FACE_ROTATE_YAW_RATE_DEG_S
+            else:
+                target_yaw = FACE_ROTATE_YAW_RATE_DEG_S
             forward = slew_limit(0.0, last_forward, FORWARD_SLEW_M_S2, dt)
             right = slew_limit(0.0, last_right, LATERAL_SLEW_M_S2, dt)
             yaw = slew_limit(target_yaw, last_yaw, YAW_SLEW_DEG_S2, dt)
@@ -1906,10 +1949,17 @@ async def visual_orbit_control(
             last_forward = forward
             last_right = right
             last_yaw = yaw
+            aligned = False
+            align_count = 0
+            arrival_count = 0
+            urgent_count = 0
+            mode_label = (
+                "FACE_SEARCH" if face_search else f"FACE_{face_rotate}"
+            )
             if now - last_print > 0.5:
                 last_print = now
                 print(
-                    f"[FACE_{face_rotate}] 目标面被遮挡，"
+                    f"[{mode_label}] 目标面被遮挡/未锁定，"
                     f"当前面={face_result.get('current_face')} Y={yaw:+.1f}"
                 )
             await asyncio.sleep(dt)
@@ -1928,7 +1978,10 @@ async def visual_orbit_control(
         )
 
         if not pose_valid:
-            lost_time = now - detector.last_seen_time
+            lost_time = now - max(
+                detector.last_seen_time,
+                track_start,
+            )
 
             target_forward = 0.0
             target_right = 0.0
@@ -2320,16 +2373,24 @@ async def visual_kf_tracking(
         )
         face_result = getattr(detector, "face_result", None)
         face_rotate = "NONE"
+        face_search = False
         if face_result is not None and face_result["state"] == "FIND_TARGET":
             face_rotate = face_result["target_direction"]
+            face_search = (
+                face_rotate == "NONE"
+                and not face_result.get("target_visible", False)
+                and face_result.get("current_face") is None
+            )
 
-        if face_rotate in ("LEFT", "RIGHT", "BACK"):
+        if face_rotate in ("LEFT", "RIGHT", "BACK") or face_search:
             if face_rotate == "LEFT":
-                target_yaw = FACE_ROTATE_YAW_RATE_DEG_S
-            elif face_rotate == "RIGHT":
                 target_yaw = -FACE_ROTATE_YAW_RATE_DEG_S
-            else:
+            elif face_rotate == "RIGHT":
+                target_yaw = FACE_ROTATE_YAW_RATE_DEG_S
+            elif face_rotate == "BACK":
                 target_yaw = 2.0 * FACE_ROTATE_YAW_RATE_DEG_S
+            else:
+                target_yaw = FACE_ROTATE_YAW_RATE_DEG_S
             forward = slew_limit(0.0, last_forward, FORWARD_SLEW_M_S2, dt)
             right = slew_limit(0.0, last_right, LATERAL_SLEW_M_S2, dt)
             yaw = slew_limit(target_yaw, last_yaw, YAW_SLEW_DEG_S2, dt)
@@ -2339,10 +2400,17 @@ async def visual_kf_tracking(
             last_forward = forward
             last_right = right
             last_yaw = yaw
+            planner.reset()
+            kf_frame_count = 0
+            last_kf_time = None
+            lost_start = now
+            mode_label = (
+                "FACE_SEARCH" if face_search else f"FACE_{face_rotate}"
+            )
             if now - last_print > 0.5:
                 last_print = now
                 print(
-                    f"[FACE_{face_rotate}] 目标面被遮挡，"
+                    f"[{mode_label}] 目标面被遮挡/未锁定，"
                     f"当前面={face_result.get('current_face')} Y={yaw:+.1f}"
                 )
             await asyncio.sleep(dt)
