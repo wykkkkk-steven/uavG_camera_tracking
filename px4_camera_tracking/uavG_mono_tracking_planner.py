@@ -1898,9 +1898,6 @@ async def visual_orbit_control(
     track_start = time.time()
     last_print = 0.0
 
-    aligned = False
-    align_count = 0
-    arrival_count = 0
     urgent_count = 0
 
     last_forward = 0.0
@@ -1949,9 +1946,6 @@ async def visual_orbit_control(
             last_forward = forward
             last_right = right
             last_yaw = yaw
-            aligned = False
-            align_count = 0
-            arrival_count = 0
             urgent_count = 0
             mode_label = (
                 "FACE_SEARCH" if face_search else f"FACE_{face_rotate}"
@@ -2036,9 +2030,6 @@ async def visual_orbit_control(
             last_forward = forward
             last_right = right
             last_yaw = yaw
-            aligned = False
-            align_count = 0
-            arrival_count = 0
             urgent_count = 0
 
             if lost_time > TARGET_LOST_LAND_S:
@@ -2090,22 +2081,6 @@ async def visual_orbit_control(
 
         predicted_x = float(predicted_center[0])
         predicted_z = float(predicted_center[2])
-        predicted_bearing_deg = math.degrees(
-            math.atan2(predicted_x, predicted_z)
-        )
-
-        # Desired camera position relative to the board is:
-        # desired_distance * normal, where normal points board -> camera.
-        # Current camera position relative to the board is -predicted_center.
-        # Therefore desired camera displacement from the current position is:
-        # desired_distance * normal + predicted_center.
-        observation_point_error = (
-            predicted_center
-            + desired_distance_m * normal
-        )
-
-        forward_error_m = float(observation_point_error[2])
-        lateral_error_m = float(observation_point_error[0])
 
         normal_range_m = float(
             np.dot(-predicted_center, normal)
@@ -2113,23 +2088,6 @@ async def visual_orbit_control(
         normal_distance_error_m = (
             normal_range_m - desired_distance_m
         )
-
-        current_camera_from_board = -predicted_center
-        face_error_deg = angle_between_vectors_deg(
-            normal,
-            current_camera_from_board,
-        )
-        if face_error_deg is None:
-            face_error_deg = 180.0
-
-        if abs(predicted_bearing_deg) <= BEARING_DEADBAND_DEG:
-            target_yaw = 0.0
-        else:
-            target_yaw = clamp(
-                KP_BEARING_YAW * predicted_bearing_deg,
-                -MAX_TRACK_YAW_RATE_DEG_S,
-                MAX_TRACK_YAW_RATE_DEG_S,
-            )
 
         board_distance = max(
             float(np.linalg.norm(predicted_center)),
@@ -2149,6 +2107,10 @@ async def visual_orbit_control(
             normal_distance_error_m
             < -URGENT_TOO_CLOSE_MARGIN_M
             or urgent_count >= URGENT_CONFIRM_FRAMES
+        )
+
+        distance_error_m = (
+            detector.target_distance_m - desired_distance_m
         )
 
         if urgent:
@@ -2186,88 +2148,28 @@ async def visual_orbit_control(
                 target_right = 0.0
 
             mode = "URGENT_RETREAT"
-            aligned = False
-            align_count = 0
-            arrival_count = 0
 
         else:
-            # Turn first. No translation is allowed until the board centre has
-            # been aligned for several consecutive frames.
-            if (
-                aligned
-                and abs(predicted_bearing_deg)
-                > REALIGN_BEARING_DEG
-            ):
-                aligned = False
-                align_count = 0
-
-            if not aligned:
-                target_forward = 0.0
-                target_right = 0.0
-                mode = "ALIGN"
-
-                if (
-                    abs(predicted_bearing_deg)
-                    <= ALIGN_BEARING_DEG
-                ):
-                    align_count += 1
-                else:
-                    align_count = 0
-
-                if align_count >= ALIGN_CONFIRM_FRAMES:
-                    aligned = True
-                    align_count = 0
-                    mode = "ALIGN_DONE"
-
+            if detector.image_w > 0:
+                half_width = detector.image_w / 2.0
+                pixel_ratio = detector.error_x / max(half_width, 1.0)
+                target_yaw = clamp(
+                    KP_YAW_NORM * pixel_ratio,
+                    -MAX_TRACK_YAW_RATE_DEG_S,
+                    MAX_TRACK_YAW_RATE_DEG_S,
+                )
             else:
-                target_forward = clamp(
-                    KP_OBSERVATION_POINT * forward_error_m
-                    + VELOCITY_FEEDFORWARD_GAIN
-                    * detector.target_vz_m_s,
-                    -MAX_TRACK_BACKWARD_SPEED,
-                    MAX_TRACK_FORWARD_SPEED,
-                )
-                target_right = clamp(
-                    KP_OBSERVATION_POINT * lateral_error_m
-                    + VELOCITY_FEEDFORWARD_GAIN
-                    * detector.target_vx_m_s,
-                    -MAX_TRACK_LATERAL_SPEED,
-                    MAX_TRACK_LATERAL_SPEED,
-                )
+                target_yaw = 0.0
 
-                distance_ok = (
-                    abs(normal_distance_error_m)
-                    < DISTANCE_TOLERANCE_M
-                )
-                center_ok = (
-                    abs(predicted_bearing_deg)
-                    < CENTER_TOLERANCE_DEG
-                )
-                face_ok = (
-                    face_error_deg
-                    < FACE_TOLERANCE_DEG
-                )
-                lateral_ok = (
-                    abs(lateral_error_m)
-                    < LATERAL_TOLERANCE_M
-                )
-
-                if (
-                    distance_ok
-                    and center_ok
-                    and face_ok
-                    and lateral_ok
-                ):
-                    arrival_count += 1
-                else:
-                    arrival_count = 0
-
-                if arrival_count >= ARRIVAL_CONFIRM_FRAMES:
-                    target_forward = 0.0
-                    target_right = 0.0
-                    mode = "HOLD"
-                else:
-                    mode = "TRACK_NORMAL_POINT"
+            target_forward = clamp(
+                KP_OBSERVATION_POINT * distance_error_m
+                + VELOCITY_FEEDFORWARD_GAIN
+                * detector.target_vz_m_s,
+                -MAX_TRACK_BACKWARD_SPEED,
+                MAX_TRACK_FORWARD_SPEED,
+            )
+            target_right = 0.0
+            mode = "TRACK_DIRECT"
 
         forward = slew_limit(
             target_forward,
@@ -2305,12 +2207,9 @@ async def visual_orbit_control(
             last_print = now
             print(
                 f"[{mode}] "
-                f"normal_range={normal_range_m:.2f}m "
-                f"distance_err={normal_distance_error_m:+.2f}m "
-                f"bearing={predicted_bearing_deg:+.1f}deg "
-                f"face_err={face_error_deg:.1f}deg "
-                f"obs_F_err={forward_error_m:+.2f}m "
-                f"obs_R_err={lateral_error_m:+.2f}m "
+                f"d={detector.target_distance_m:.2f}m "
+                f"d_err={distance_error_m:+.2f}m "
+                f"px={detector.error_x:+.1f} "
                 f"vx={detector.target_vx_m_s:+.2f} "
                 f"vz={detector.target_vz_m_s:+.2f} "
                 f"F={forward:+.2f} "
