@@ -8,14 +8,14 @@ import math
 import numpy as np
 import cv2
 import rclpy
-from cv_bridge import CvBridge
-from rclpy.node import Node
-from sensor_msgs.msg import Image, CameraInfo
+from .cv_bridge import CvBridge
+from .rclpy.node import Node
+from .sensor_msgs.msg import Image, CameraInfo
 
-from mavsdk import System
-from mavsdk.offboard import OffboardError, VelocityBodyYawspeed, PositionNedYaw
+from .mavsdk import System
+from .mavsdk.offboard import OffboardError, VelocityBodyYawspeed, PositionNedYaw
 
-from target_face_tracker import TargetFaceTracker
+from .target_face_tracker import TargetFaceTracker
 
 
 # ================= 基本连接参数 =================
@@ -75,7 +75,7 @@ DEFAULT_DESIRED_DISTANCE_M = 2.0
 MAX_VALID_MONO_DISTANCE_M = 30.0
 MIN_CHARUCO_CORNERS_FOR_POSE = 4
 POSE_MAX_REPROJECTION_ERROR_PX = 8.0
-POSE_FILTER_ALPHA = 0.35
+POSE_FILTER_ALPHA = 0.55
 NORMAL_FILTER_ALPHA = 0.30
 
 # Simple controller: ALIGN -> TRACK. Emergency retreat is only a priority
@@ -93,13 +93,13 @@ ALIGN_BEARING_DEG = 2.0
 ALIGN_CONFIRM_FRAMES = 5
 REALIGN_BEARING_DEG = 10.0
 
-DISTANCE_TOLERANCE_M = 0.40
+DISTANCE_TOLERANCE_M = 0.25
 CENTER_TOLERANCE_DEG = 2.0
 FACE_TOLERANCE_DEG = 5.0
 LATERAL_TOLERANCE_M = 0.35
 ARRIVAL_CONFIRM_FRAMES = 5
 
-TARGET_PREDICTION_TIME_S = 0.20
+TARGET_PREDICTION_TIME_S = 0.05 #原0.20，速度预测权重降低
 TARGET_VELOCITY_FILTER_ALPHA = 0.25
 MAX_PREDICT_SPEED_M_S = 2.0
 VELOCITY_FEEDFORWARD_GAIN = 0.70
@@ -111,7 +111,7 @@ URGENT_RETREAT_MIN_SPEED = 0.20
 URGENT_RETREAT_MAX_SPEED = 0.75
 URGENT_RETREAT_KP = 0.55
 
-FORWARD_SLEW_M_S2 = 0.90
+FORWARD_SLEW_M_S2 = 1.20 #和KP一起改
 LATERAL_SLEW_M_S2 = 0.60
 YAW_SLEW_DEG_S2 = 30.0
 
@@ -132,10 +132,10 @@ KF_INITIAL_COV_VEL = 5.0
 KF_WARMUP_FRAMES = 20
 KF_MAX_DT_S = 0.5
 PLANNER_KP_YAW = 0.80
-PLANNER_KP_DIST = 0.30
+PLANNER_KP_DIST = 0.50 #宽松
 PLANNER_MAX_FORWARD = 1.0
 PLANNER_MAX_RETREAT = 0.75
-PLANNER_DEADBAND_M = 0.5
+PLANNER_DEADBAND_M = 0.1
 PLANNER_SAFE_DISTANCE_M = 0.5
 PLANNER_PREDICT_TIME_S = 0.25
 PLANNER_FF_GAIN = 0.70
@@ -1898,8 +1898,6 @@ async def visual_orbit_control(
     track_start = time.time()
     last_print = 0.0
 
-    urgent_count = 0
-
     last_forward = 0.0
     last_right = 0.0
     last_yaw = 0.0
@@ -1946,7 +1944,6 @@ async def visual_orbit_control(
             last_forward = forward
             last_right = right
             last_yaw = yaw
-            urgent_count = 0
             mode_label = (
                 "FACE_SEARCH" if face_search else f"FACE_{face_rotate}"
             )
@@ -1964,6 +1961,7 @@ async def visual_orbit_control(
             and detector.board_pose_valid
             and detector.target_x_m is not None
             and detector.target_z_m is not None
+            and detector.target_distance_m is not None
             and detector.board_normal_x is not None
             and detector.board_normal_z is not None
             and detector.target_face_error_deg is not None
@@ -2030,7 +2028,6 @@ async def visual_orbit_control(
             last_forward = forward
             last_right = right
             last_yaw = yaw
-            urgent_count = 0
 
             if lost_time > TARGET_LOST_LAND_S:
                 return "lost_timeout"
@@ -2044,6 +2041,12 @@ async def visual_orbit_control(
 
             await asyncio.sleep(dt)
             continue
+
+        lost_confirm = (
+            face_result is not None
+            and face_result["state"] == "LOST_CONFIRM"
+            and not face_result.get("target_visible", False)
+        )
 
         center = np.array(
             [
@@ -2098,15 +2101,9 @@ async def visual_orbit_control(
             / board_distance
         )
 
-        if radial_closing_speed < -URGENT_CLOSING_SPEED_M_S:
-            urgent_count += 1
-        else:
-            urgent_count = max(0, urgent_count - 1)
-
         urgent = (
             normal_distance_error_m
             < -URGENT_TOO_CLOSE_MARGIN_M
-            or urgent_count >= URGENT_CONFIRM_FRAMES
         )
 
         distance_error_m = (
@@ -2134,42 +2131,43 @@ async def visual_orbit_control(
                 URGENT_RETREAT_MAX_SPEED,
             )
 
-            if radial_closing_speed < 0.0:
-                horizontal_range = max(
-                    math.hypot(predicted_x, predicted_z),
-                    1e-3,
-                )
-                target_forward = (
-                    -retreat_speed
-                    * predicted_z
-                    / horizontal_range
-                )
-                target_right = (
-                    -retreat_speed
-                    * predicted_x
-                    / horizontal_range
-                )
-                target_right = clamp(
-                    target_right,
-                    -MAX_TRACK_LATERAL_SPEED,
-                    MAX_TRACK_LATERAL_SPEED,
-                )
-            else:
-                target_forward = 0.0
-                target_right = 0.0
+            horizontal_range = max(
+                math.hypot(predicted_x, predicted_z),
+                1e-3,
+            )
+            target_forward = (
+                -retreat_speed
+                * predicted_z
+                / horizontal_range
+            )
+            target_right = (
+                -retreat_speed
+                * predicted_x
+                / horizontal_range
+            )
+            target_right = clamp(
+                target_right,
+                -MAX_TRACK_LATERAL_SPEED,
+                MAX_TRACK_LATERAL_SPEED,
+            )
 
             mode = "URGENT_RETREAT"
 
         else:
-            target_forward = clamp(
-                KP_OBSERVATION_POINT * distance_error_m
-                + VELOCITY_FEEDFORWARD_GAIN
-                * detector.target_vz_m_s,
-                -MAX_TRACK_BACKWARD_SPEED,
-                MAX_TRACK_FORWARD_SPEED,
-            )
-            target_right = 0.0
-            mode = "TRACK_DIRECT"
+            if lost_confirm:
+                target_forward = 0.0
+                target_right = 0.0
+                mode = "LOST_CONFIRM_HOLD"
+            else:
+                target_forward = clamp(
+                    KP_OBSERVATION_POINT * distance_error_m
+                    + VELOCITY_FEEDFORWARD_GAIN
+                    * detector.target_vz_m_s,
+                    -MAX_TRACK_BACKWARD_SPEED,
+                    MAX_TRACK_FORWARD_SPEED,
+                )
+                target_right = 0.0
+                mode = "TRACK_DIRECT"
 
         forward = slew_limit(
             target_forward,
@@ -2372,6 +2370,46 @@ async def visual_kf_tracking(
 
         lost_start = None
 
+        lost_confirm = (
+            face_result is not None
+            and face_result["state"] == "LOST_CONFIRM"
+            and not face_result.get("target_visible", False)
+        )
+        if lost_confirm:
+            target_forward = 0.0
+            target_right = 0.0
+            if detector.image_w > 0:
+                half_width = detector.image_w / 2.0
+                pixel_ratio = detector.error_x / max(half_width, 1.0)
+                target_yaw = clamp(
+                    KP_YAW_NORM * pixel_ratio,
+                    -MAX_TRACK_YAW_RATE_DEG_S,
+                    MAX_TRACK_YAW_RATE_DEG_S,
+                )
+            else:
+                target_yaw = 0.0
+            forward = slew_limit(
+                target_forward, last_forward, FORWARD_SLEW_M_S2, dt
+            )
+            right = slew_limit(
+                target_right, last_right, LATERAL_SLEW_M_S2, dt
+            )
+            yaw = slew_limit(target_yaw, last_yaw, YAW_SLEW_DEG_S2, dt)
+            await drone.offboard.set_velocity_body(
+                VelocityBodyYawspeed(forward, right, 0.0, yaw)
+            )
+            last_forward = forward
+            last_right = right
+            last_yaw = yaw
+            if now - last_print > 0.5:
+                last_print = now
+                print(
+                    f"[KF_LOST_CONFIRM_HOLD] F={forward:+.2f} "
+                    f"R={right:+.2f} Y={yaw:+.1f}"
+                )
+            await asyncio.sleep(dt)
+            continue
+
         try:
             pos_data = drone_position_provider()
             if pos_data is None:
@@ -2506,17 +2544,7 @@ async def visual_kf_tracking(
                 URGENT_RETREAT_MIN_SPEED,
                 URGENT_RETREAT_MAX_SPEED,
             )
-            # Radial closing speed from the KF velocity estimate:
-            # negative = target is approaching, positive = receding.
-            radial_speed = 0.0
-            if math.hypot(err_n, err_e) > 1e-3:
-                radial_speed = (
-                    use_vn * err_n + use_ve * err_e
-                ) / math.hypot(err_n, err_e)
-            if radial_speed < 0.0:
-                target_forward = -retreat_speed
-            else:
-                target_forward = 0.0
+            target_forward = -retreat_speed
             target_right = PLANNER_FF_GAIN * ff_right
             mode = "KF_URGENT_RETREAT"
         else:
