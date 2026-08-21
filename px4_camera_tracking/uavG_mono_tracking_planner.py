@@ -8,12 +8,12 @@ import math
 import numpy as np
 import cv2
 import rclpy
-from .cv_bridge import CvBridge
-from .rclpy.node import Node
-from .sensor_msgs.msg import Image, CameraInfo
+from cv_bridge import CvBridge
+from rclpy.node import Node
+from sensor_msgs.msg import Image, CameraInfo
 
-from .mavsdk import System
-from .mavsdk.offboard import OffboardError, VelocityBodyYawspeed, PositionNedYaw
+from mavsdk import System
+from mavsdk.offboard import OffboardError, VelocityBodyYawspeed, PositionNedYaw
 
 from .target_face_tracker import TargetFaceTracker
 
@@ -75,16 +75,16 @@ DEFAULT_DESIRED_DISTANCE_M = 2.0
 MAX_VALID_MONO_DISTANCE_M = 30.0
 MIN_CHARUCO_CORNERS_FOR_POSE = 4
 POSE_MAX_REPROJECTION_ERROR_PX = 8.0
-POSE_FILTER_ALPHA = 0.55
-NORMAL_FILTER_ALPHA = 0.30
+POSE_FILTER_ALPHA = 0.75
+NORMAL_FILTER_ALPHA = 0.45
 
 # Simple controller: ALIGN -> TRACK. Emergency retreat is only a priority
 # override, not another persistent state.
-MAX_TRACK_FORWARD_SPEED = 0.75
-MAX_TRACK_BACKWARD_SPEED = 0.75
-MAX_TRACK_LATERAL_SPEED = 0.30
+MAX_TRACK_FORWARD_SPEED = 2.0
+MAX_TRACK_BACKWARD_SPEED = 1.5
+MAX_TRACK_LATERAL_SPEED = 0.80
 
-KP_OBSERVATION_POINT = 0.30
+KP_OBSERVATION_POINT = 0.80
 KP_BEARING_YAW = 1.10
 MAX_TRACK_YAW_RATE_DEG_S = 15.0
 BEARING_DEADBAND_DEG = 1.5
@@ -93,22 +93,22 @@ ALIGN_BEARING_DEG = 2.0
 ALIGN_CONFIRM_FRAMES = 5
 REALIGN_BEARING_DEG = 10.0
 
-DISTANCE_TOLERANCE_M = 0.25
+DISTANCE_TOLERANCE_M = 0.10
 CENTER_TOLERANCE_DEG = 2.0
 FACE_TOLERANCE_DEG = 5.0
-LATERAL_TOLERANCE_M = 0.35
+LATERAL_TOLERANCE_M = 0.15
 ARRIVAL_CONFIRM_FRAMES = 5
 
 TARGET_PREDICTION_TIME_S = 0.05 #原0.20，速度预测权重降低
 TARGET_VELOCITY_FILTER_ALPHA = 0.25
 MAX_PREDICT_SPEED_M_S = 2.0
-VELOCITY_FEEDFORWARD_GAIN = 0.70
+VELOCITY_FEEDFORWARD_GAIN = 1.00
 
 URGENT_TOO_CLOSE_MARGIN_M = 0.30
 URGENT_CLOSING_SPEED_M_S = 0.70
 URGENT_CONFIRM_FRAMES = 3
 URGENT_RETREAT_MIN_SPEED = 0.20
-URGENT_RETREAT_MAX_SPEED = 0.75
+URGENT_RETREAT_MAX_SPEED = 1.5
 URGENT_RETREAT_KP = 0.55
 
 FORWARD_SLEW_M_S2 = 1.20 #和KP一起改
@@ -1935,8 +1935,25 @@ async def visual_orbit_control(
                 target_yaw = 2.0 * FACE_ROTATE_YAW_RATE_DEG_S
             else:
                 target_yaw = FACE_ROTATE_YAW_RATE_DEG_S
-            forward = slew_limit(0.0, last_forward, FORWARD_SLEW_M_S2, dt)
-            right = slew_limit(0.0, last_right, LATERAL_SLEW_M_S2, dt)
+            target_forward = 0.0
+            target_right = 0.0
+            if (
+                face_rotate in ("LEFT", "RIGHT", "BACK")
+                and marker_visible
+                and detector.target_distance_m is not None
+            ):
+                target_forward = clamp(
+                    0.5
+                    * (detector.target_distance_m - desired_distance_m),
+                    -0.5,
+                    0.5,
+                )
+            forward = slew_limit(
+                target_forward, last_forward, FORWARD_SLEW_M_S2, dt
+            )
+            right = slew_limit(
+                target_right, last_right, LATERAL_SLEW_M_S2, dt
+            )
             yaw = slew_limit(target_yaw, last_yaw, YAW_SLEW_DEG_S2, dt)
             await drone.offboard.set_velocity_body(
                 VelocityBodyYawspeed(forward, right, 0.0, yaw)
@@ -2106,10 +2123,6 @@ async def visual_orbit_control(
             < -URGENT_TOO_CLOSE_MARGIN_M
         )
 
-        distance_error_m = (
-            detector.target_distance_m - desired_distance_m
-        )
-
         if detector.image_w > 0:
             half_width = detector.image_w / 2.0
             pixel_ratio = detector.error_x / max(half_width, 1.0)
@@ -2120,6 +2133,10 @@ async def visual_orbit_control(
             )
         else:
             target_yaw = 0.0
+
+        lateral_error_m = float(
+            predicted_center[0] + desired_distance_m * normal[0]
+        )
 
         if urgent:
             retreat_speed = clamp(
@@ -2159,14 +2176,37 @@ async def visual_orbit_control(
                 target_right = 0.0
                 mode = "LOST_CONFIRM_HOLD"
             else:
-                target_forward = clamp(
-                    KP_OBSERVATION_POINT * distance_error_m
-                    + VELOCITY_FEEDFORWARD_GAIN
-                    * detector.target_vz_m_s,
-                    -MAX_TRACK_BACKWARD_SPEED,
-                    MAX_TRACK_FORWARD_SPEED,
-                )
-                target_right = 0.0
+                if abs(normal_distance_error_m) < DISTANCE_TOLERANCE_M:
+                    target_forward = clamp(
+                        VELOCITY_FEEDFORWARD_GAIN
+                        * detector.target_vz_m_s,
+                        -MAX_TRACK_BACKWARD_SPEED,
+                        MAX_TRACK_FORWARD_SPEED,
+                    )
+                else:
+                    target_forward = clamp(
+                        KP_OBSERVATION_POINT * normal_distance_error_m
+                        + VELOCITY_FEEDFORWARD_GAIN
+                        * detector.target_vz_m_s,
+                        -MAX_TRACK_BACKWARD_SPEED,
+                        MAX_TRACK_FORWARD_SPEED,
+                    )
+
+                if abs(lateral_error_m) < LATERAL_TOLERANCE_M:
+                    target_right = clamp(
+                        VELOCITY_FEEDFORWARD_GAIN
+                        * detector.target_vx_m_s,
+                        -MAX_TRACK_LATERAL_SPEED,
+                        MAX_TRACK_LATERAL_SPEED,
+                    )
+                else:
+                    target_right = clamp(
+                        KP_OBSERVATION_POINT * lateral_error_m
+                        + VELOCITY_FEEDFORWARD_GAIN
+                        * detector.target_vx_m_s,
+                        -MAX_TRACK_LATERAL_SPEED,
+                        MAX_TRACK_LATERAL_SPEED,
+                    )
                 mode = "TRACK_DIRECT"
 
         forward = slew_limit(
@@ -2206,7 +2246,8 @@ async def visual_orbit_control(
             print(
                 f"[{mode}] "
                 f"d={detector.target_distance_m:.2f}m "
-                f"d_err={distance_error_m:+.2f}m "
+                f"d_err={normal_distance_error_m:+.2f}m "
+                f"lat={lateral_error_m:+.2f}m "
                 f"px={detector.error_x:+.1f} "
                 f"vx={detector.target_vx_m_s:+.2f} "
                 f"vz={detector.target_vz_m_s:+.2f} "
@@ -2288,8 +2329,25 @@ async def visual_kf_tracking(
                 target_yaw = 2.0 * FACE_ROTATE_YAW_RATE_DEG_S
             else:
                 target_yaw = FACE_ROTATE_YAW_RATE_DEG_S
-            forward = slew_limit(0.0, last_forward, FORWARD_SLEW_M_S2, dt)
-            right = slew_limit(0.0, last_right, LATERAL_SLEW_M_S2, dt)
+            target_forward = 0.0
+            target_right = 0.0
+            if (
+                face_rotate in ("LEFT", "RIGHT", "BACK")
+                and marker_visible
+                and detector.target_distance_m is not None
+            ):
+                target_forward = clamp(
+                    0.5
+                    * (detector.target_distance_m - desired_distance_m),
+                    -0.5,
+                    0.5,
+                )
+            forward = slew_limit(
+                target_forward, last_forward, FORWARD_SLEW_M_S2, dt
+            )
+            right = slew_limit(
+                target_right, last_right, LATERAL_SLEW_M_S2, dt
+            )
             yaw = slew_limit(target_yaw, last_yaw, YAW_SLEW_DEG_S2, dt)
             await drone.offboard.set_velocity_body(
                 VelocityBodyYawspeed(forward, right, 0.0, yaw)
